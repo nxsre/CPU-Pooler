@@ -19,6 +19,7 @@ var (
 	kubeConfig     string
 	poolConfigPath string
 	cpusetRoot     string
+	cpuRoot        string
 )
 
 func main() {
@@ -30,7 +31,7 @@ func main() {
 	if err != nil {
 		log.Fatal("ERROR: Could not read CPU pool configuration files because: " + err.Error() + ", exiting!")
 	}
-	setHandler, err := sethandler.New(kubeConfig, poolConf, cpusetRoot)
+	setHandler, err := sethandler.New(kubeConfig, poolConf, cpusetRoot, cpuRoot)
 	if err != nil {
 		log.Fatal("ERROR: Could not initalize K8s client because of error: " + err.Error() + ", exiting!")
 	}
@@ -50,5 +51,6 @@ func main() {
 func init() {
 	flag.StringVar(&poolConfigPath, "poolconfigs", "", "Path to the pool configuration files. Mandatory parameter.")
 	flag.StringVar(&cpusetRoot, "cpusetroot", "", "The root of the cgroupfs where Kubernetes creates the cpusets for the Pods . Mandatory parameter.")
+	flag.StringVar(&cpuRoot, "cpuroot", "", "The root of the system where Kubernetes creates the cpu for the Pods . Mandatory parameter.")
 	flag.StringVar(&kubeConfig, "kubeconfig", "", "Path to a kubeconfig. Optional parameter, only required if out-of-cluster.")
 }

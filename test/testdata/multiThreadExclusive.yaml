@@ -1,4 +1,4 @@
-resourceBaseName: "nokia.k8s.io"
+resourceBaseName: "bonc.k8s.io"
 nodeSelector:
   nodename: caas_master1
 pools:

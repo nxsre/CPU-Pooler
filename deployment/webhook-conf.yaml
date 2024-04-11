@@ -1,10 +1,12 @@
 ---
-apiVersion: admissionregistration.k8s.io/v1beta1
+apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
   name: cpu-device-pod-mutator-webhook-config
 webhooks:
-  - name: cpu-dev-mutator.nokia.k8s.io
+  - name: cpu-dev-mutator.bonc.k8s.io
+    sideEffects: NoneOnDryRun
+    admissionReviewVersions: ["v1"]
     clientConfig:
       service:
         name: cpu-dev-pod-mutator-svc

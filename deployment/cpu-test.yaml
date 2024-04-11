@@ -3,7 +3,7 @@ kind: Pod
 metadata:
   name: cpupod
   annotations:
-    nokia.k8s.io/cpus: |
+    bonc.k8s.io/cpus: |
       [{
       "container": "exclusivetestcontainer",
       "processes":
@@ -39,9 +39,9 @@ spec:
     resources:
       requests:
         memory: 2000Mi
-        nokia.k8s.io/shared-pool: "160"
+        bonc.k8s.io/shared-pool: "160"
       limits:
-        nokia.k8s.io/shared-pool: "160"
+        bonc.k8s.io/shared-pool: "160"
         memory: 2000Mi
   - name: exclusivetestcontainer
     image: busyloop
@@ -51,12 +51,12 @@ spec:
     resources:
       requests:
         memory: 2000Mi
-        nokia.k8s.io/exclusive-pool: "2"
-        nokia.k8s.io/shared-pool: "100"
+        bonc.k8s.io/exclusive-pool: "2"
+        bonc.k8s.io/shared-pool: "100"
       limits:
         memory: 2000Mi
-        nokia.k8s.io/shared-pool: "100"
-        nokia.k8s.io/exclusive-pool: "2"
+        bonc.k8s.io/shared-pool: "100"
+        bonc.k8s.io/exclusive-pool: "2"
   - name: defaulttestcontainer
     command: [ "/bin/sh", "-c", "--" ]
     args: [ "while true; do sleep 1; done;" ]

@@ -111,7 +111,7 @@ data:
 ```
 The poolconfig-<name>.yaml file must exist in the data section.
 The CPU pools are defined in poolconfig-<name>.yaml files. There must be at least one poolconfig-<name>.yaml file in the data section.
-Pool name from the config will be the resource in the fully qualified resource name (`nokia.k8s.io/<pool name>`). The pool name must have pool type prefix - 'exclusive' for exclusive CPU pool or 'shared' for shared CPU pool.
+Pool name from the config will be the resource in the fully qualified resource name (`bonc.k8s.io/<pool name>`). The pool name must have pool type prefix - 'exclusive' for exclusive CPU pool or 'shared' for shared CPU pool.
 A CPU pool not having either of these special prefixes is considered as the cluster-wide 'default' CPU pool, and as such, CPU cores belonging to this pool will not be advertised to the Device Manager as schedulable resources.
 
 
@@ -130,11 +130,11 @@ In the deployment directory there is a sample pool config with two exclusive poo
 Please note: currently only one shared pool is supported per Node!
 ### Pod spec
 
-The cpu-device-plugin advertises the resources of exclusive, and shared CPU pools as name: `nokia.k8s.io/<poolname>`. The poolname is pool name configured in cpu-pooler-configmap. The cpus are requested in the resources section of container in the pod spec.
+The cpu-device-plugin advertises the resources of exclusive, and shared CPU pools as name: `bonc.k8s.io/<poolname>`. The poolname is pool name configured in cpu-pooler-configmap. The cpus are requested in the resources section of container in the pod spec.
 
 ### Annotation:
 
-Annotation schema is following and the name for the annotation is `nokia.k8s.io/cpus`. Resource being the the advertised resource name.
+Annotation schema is following and the name for the annotation is `bonc.k8s.io/cpus`. Resource being the the advertised resource name.
 ```
 {
   "$schema": "http://json-schema.org/draft-07/schema#",

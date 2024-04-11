@@ -31,7 +31,7 @@ const (
 var (
 	scheme             = runtime.NewScheme()
 	codecs             = serializer.NewCodecFactory(scheme)
-	resourceBaseName   = "nokia.k8s.io"
+	resourceBaseName   = "bonc.k8s.io"
 	processStarterPath = "/opt/bin/process-starter"
 	certFile           string
 	keyFile            string
@@ -114,7 +114,7 @@ func validateAnnotation(poolRequests poolRequestMap, cpuAnnotation types.CPUAnno
 				return fmt.Errorf("Container %s; Pool %s in annotation not found from resources", cName, pool)
 			}
 			// cpu request in annotation can be twice as exclusive pool request in resources in case of HT is enabled (HT policy is "multiThreaded")
-			if cpuAnnotation.ContainerTotalCPURequest(pool, cName) > 2 * value {
+			if cpuAnnotation.ContainerTotalCPURequest(pool, cName) > 2*value {
 				return fmt.Errorf("Exclusive CPU requests %d do not match to annotation %d",
 					cPoolRequests.pools[pool],
 					cpuAnnotation.ContainerTotalCPURequest(pool, cName))
@@ -243,11 +243,18 @@ func patchContainerForPinning(cpuAnnotation types.CPUAnnotation, patchList []pat
 	patchList = append(patchList, patchItem)
 
 	// hostbin volumeMount. Location for process starter binary
-
 	patchItem.Path = "/spec/containers/" + strconv.Itoa(i) + "/volumeMounts/-"
 	contVolumePatch := `{"name":"hostbin","mountPath":"` + processStarterPath + `","readOnly":true}`
 	patchItem.Value =
 		json.RawMessage(contVolumePatch)
+	patchList = append(patchList, patchItem)
+
+	// cpu volumeMount.
+	patchItem.Path = "/spec/containers/" + strconv.Itoa(i) + "/volumeMounts/-"
+	contCPUVolumePatch := `{"name":"` + fmt.Sprintf("cpu-%s", c.Name) + `","mountPath":"/sys/devices/system/cpu",
+							"readOnly":true,"mountPropagation":"HostToContainer"}`
+	patchItem.Value =
+		json.RawMessage(contCPUVolumePatch)
 	patchList = append(patchList, patchItem)
 
 	// Container name to env variable
@@ -281,7 +288,7 @@ func patchContainerForPinning(cpuAnnotation types.CPUAnnotation, patchList []pat
 	return patchList, nil
 }
 
-func patchVolumesForPinning(patchList []patch) []patch {
+func patchVolumesForPinning(patchList []patch, pod corev1.Pod) []patch {
 	var patchItem patch
 	patchItem.Op = "add"
 
@@ -294,6 +301,15 @@ func patchVolumesForPinning(patchList []patch) []patch {
 	volumePathPatch := `{"name":"hostbin","hostPath":{ "path":"` + processStarterPath + `"} }`
 	patchItem.Value = json.RawMessage(volumePathPatch)
 	patchList = append(patchList, patchItem)
+	for _, container := range pod.Spec.Containers {
+		// cpu volume
+		patchItem.Path = "/spec/volumes/-"
+		cpuVolumePathPatch := `{"name":"` + fmt.Sprintf("cpu-%s", container.Name) + `","hostPath":{ "path":"` +
+			fmt.Sprintf("/var/lib/kubelet/pods/sys/devices/system/cpu/%s/%s/%s", pod.Namespace, pod.Name, container.Name) +
+			`","type": "DirectoryOrCreate" }`
+		patchItem.Value = json.RawMessage(cpuVolumePathPatch)
+		patchList = append(patchList, patchItem)
+	}
 	return patchList
 }
 
@@ -395,7 +411,7 @@ func mutatePods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 			}
 		}
 		if !exists {
-			patchList = patchVolumesForPinning(patchList)
+			patchList = patchVolumesForPinning(patchList, pod)
 		}
 	} else if podAnnotationExists {
 		glog.Errorf("CPU annotation exists but no container was patched %v:%v",

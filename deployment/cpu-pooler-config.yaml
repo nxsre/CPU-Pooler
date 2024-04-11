@@ -6,25 +6,21 @@ metadata:
 data:
   poolconfig-controller.yaml: |
     pools: 
+      exclusive-pool-cloudphon-1e:
+        cpus : "64-127"
+        hyperThreadingPolicy: singleThreaded
+        overcommitment: 3
       exclusive-pool:
         cpus : "4,5"
         hyperThreadingPolicy: singleThreaded
-      exclusive-pool-2:
-        cpus : "2,3"
+      exclusive-pool-cloudphone-2:
+        cpus : "64-127"
         hyperThreadingPolicy: multiThreaded
+        
       shared-pool:
-        cpus : "1"
+        cpus : "10-63"
       default:
         cpus: "0"
     nodeSelector:
-      nodeType: controller
-  poolconfig-dpdk.yaml: |
-    pools: 
-      exclusive-pool:
-        cpus : "2-7"
-      shared-pool:
-        cpus : "1"
-      default:
-        cpus: "0"
-    nodeSelector:
-      nodeType: dpdk
+      #node-role.kubernetes.io/node: 
+      kubernetes.io/hostname: xxx
