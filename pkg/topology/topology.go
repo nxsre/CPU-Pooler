@@ -2,19 +2,19 @@ package topology
 
 import (
 	"bytes"
-	"k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
+	"k8s.io/utils/cpuset"
 	"log"
 	"os/exec"
 	"strconv"
 	"strings"
 )
 
-//GetNodeTopology inspects the node's CPU architecture with lscpu, and returns a map of coreID-NUMA node ID associations
+// GetNodeTopology inspects the node's CPU architecture with lscpu, and returns a map of coreID-NUMA node ID associations
 func GetNodeTopology() map[int]int {
 	return listAndParseCores("node")
 }
 
-//GetHTTopology inspects the node's CPU architecture with lscpu, and returns a map of physical coreID-list of logical coreIDs associations
+// GetHTTopology inspects the node's CPU architecture with lscpu, and returns a map of physical coreID-list of logical coreIDs associations
 func GetHTTopology() map[int]string {
 	coreMap := listAndParseCores("core")
 	htMap := make(map[int]string)
@@ -31,10 +31,10 @@ func GetHTTopology() map[int]string {
 	return htMap
 }
 
-//AddHTSiblingsToCPUSet takes an allocated exclusive CPU set and expands it with all the sibling threads belonging to the allocated physical cores
+// AddHTSiblingsToCPUSet takes an allocated exclusive CPU set and expands it with all the sibling threads belonging to the allocated physical cores
 func AddHTSiblingsToCPUSet(exclusiveCPUSet cpuset.CPUSet, coreMap map[int]string) cpuset.CPUSet {
 	tempSet := exclusiveCPUSet
-	for _, coreID := range exclusiveCPUSet.ToSlice() {
+	for _, coreID := range exclusiveCPUSet.List() {
 		if siblings, exists := coreMap[coreID]; exists {
 			siblingSet, err := cpuset.Parse(siblings)
 			if err != nil {
@@ -47,8 +47,8 @@ func AddHTSiblingsToCPUSet(exclusiveCPUSet cpuset.CPUSet, coreMap map[int]string
 	return tempSet
 }
 
-//ExecCommand is generic wrapper around cmd.Run. It executes the exec.Cmd arriving as an input parameters, and either returns an error, or the stdout of the command to the caller
-//Used to interrogate CPU topology and cpusets directly from the host OS
+// ExecCommand is generic wrapper around cmd.Run. It executes the exec.Cmd arriving as an input parameters, and either returns an error, or the stdout of the command to the caller
+// Used to interrogate CPU topology and cpusets directly from the host OS
 func ExecCommand(cmd *exec.Cmd) (string, error) {
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout

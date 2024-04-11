@@ -4,7 +4,7 @@ metadata:
   name: cpupooler
   namespace: kube-system
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: cpu-pooler
@@ -13,7 +13,7 @@ rules:
   resources: ["pods", "nodes"]
   verbs: ["get", "watch", "list"]
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: cpu-pooler
@@ -40,9 +40,10 @@ spec:
       labels:
         name: cpu-device-plugin
     spec:
+      hostNetwork: true
       containers:
       - name: cpu-device-plugin 
-        image: cpudp
+        image: docker.io/library/cpudp
         imagePullPolicy: IfNotPresent
         command: [ "/cpu-device-plugin", "-logtostderr" ]
         volumeMounts:

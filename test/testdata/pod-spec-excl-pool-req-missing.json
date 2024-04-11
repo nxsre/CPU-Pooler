@@ -74,11 +74,11 @@
                         ],
                         "resources": {
                             "requests": {
-                                "nokia.k8s.io/exclusive-pool1": "3",
+                                "bonc.k8s.io/exclusive-pool1": "3",
                                 "memory": "2000Mi"
                             },
                             "limits": {
-                                "nokia.k8s.io/exclusive-pool1": "3",
+                                "bonc.k8s.io/exclusive-pool1": "3",
                                 "memory": "2000Mi"
                             }
                         }
@@ -90,7 +90,7 @@
                 "namespace": "default",
                 "name": "cpupod",
                 "annotations": {
-                    "nokia.k8s.io/cpus": "[{\n\"container\": \"cputestcontainer\",\n\"processes\":\n  [{\n     \"process\": \"/bin/sh\",\n     \"args\": [\"-c\",\"/thread_busyloop -n \\\"Process \\\"1\"],\n     \"cpus\": 2,\n     \"pool\": \"exclusive-pool\"\n   },\n   {\n     \"process\": \"/bin/sh\",\n     \"args\": [\"-c\", \"/thread_busyloop -n \\\"Process \\\"2\"],\n     \"pool\": \"exclusive-pool\",\n     \"cpus\": 2\n   } \n]\n}]\n"
+                    "bonc.k8s.io/cpus": "[{\n\"container\": \"cputestcontainer\",\n\"processes\":\n  [{\n     \"process\": \"/bin/sh\",\n     \"args\": [\"-c\",\"/thread_busyloop -n \\\"Process \\\"1\"],\n     \"cpus\": 2,\n     \"pool\": \"exclusive-pool\"\n   },\n   {\n     \"process\": \"/bin/sh\",\n     \"args\": [\"-c\", \"/thread_busyloop -n \\\"Process \\\"2\"],\n     \"pool\": \"exclusive-pool\",\n     \"cpus\": 2\n   } \n]\n}]\n"
                 }
             }
         },

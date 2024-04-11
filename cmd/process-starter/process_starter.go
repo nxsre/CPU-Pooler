@@ -12,7 +12,7 @@ import (
 
 	"github.com/nokia/CPU-Pooler/pkg/types"
 	"golang.org/x/sys/unix"
-	"k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
+	"k8s.io/utils/cpuset"
 )
 
 func readCPUAnnotation() ([]types.Container, error) {
@@ -28,8 +28,8 @@ func readCPUAnnotation() ([]types.Container, error) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		str := scanner.Text()
-		if strings.Contains(str, "nokia.k8s.io/cpus=") {
-			ann = strings.Replace(str, "nokia.k8s.io/cpus=", "", 1)
+		if strings.Contains(str, "bonc.k8s.io/cpus=") {
+			ann = strings.Replace(str, "bonc.k8s.io/cpus=", "", 1)
 			break
 		}
 	}
@@ -129,8 +129,8 @@ func pollCPUSetCompletion() (exclusiveCPUs, sharedCPUs []int) {
 		fmt.Printf("Cgroup cpuset (%s) expected cpuset (%s)\n",
 			cs.String(), expCpus.String())
 		if expCpus.Equals(cs) {
-			exclusiveCPUs = exclusiveCPUSet.ToSlice()
-			sharedCPUs = sharedCPUSet.ToSlice()
+			exclusiveCPUs = exclusiveCPUSet.List()
+			sharedCPUs = sharedCPUSet.List()
 			fmt.Printf("Exclusive cpu list %v\n", exclusiveCPUs)
 			fmt.Printf("Shared cpu list %v\n", sharedCPUs)
 			return

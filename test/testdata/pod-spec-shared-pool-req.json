@@ -74,13 +74,13 @@
                         ],
                         "resources": {
                             "requests": {
-                                "nokia.k8s.io/cpupool2": "2",
-                                "nokia.k8s.io/sharedpool": "160",
+                                "bonc.k8s.io/cpupool2": "2",
+                                "bonc.k8s.io/sharedpool": "160",
                                 "memory": "2000Mi"
                             },
                             "limits": {
-                                "nokia.k8s.io/cpupool2": "2",
-                                "nokia.k8s.io/sharedpool": "160",
+                                "bonc.k8s.io/cpupool2": "2",
+                                "bonc.k8s.io/sharedpool": "160",
                                 "memory": "2000Mi"
                             }
                         }
@@ -109,11 +109,11 @@
                         "imagePullPolicy": "IfNotPresent",
                         "resources": {
                             "requests": {
-                                "nokia.k8s.io/cpupool1": "2",
+                                "bonc.k8s.io/cpupool1": "2",
                                 "memory": "2000Mi"
                             },
                             "limits": {
-                                "nokia.k8s.io/cpupool1": "2",
+                                "bonc.k8s.io/cpupool1": "2",
                                 "memory": "2000Mi"
                             }
                         }
@@ -125,7 +125,7 @@
                 "namespace": "default",
                 "name": "cpupod",
                 "annotations": {
-                    "nokia.k8s.io/cpus": "[{\n\"container\": \"cputestcontainer\",\n\"processes\":\n  [{\n     \"process\": \"/bin/sh\",\n     \"args\": [\"-c\",\"/thread_busyloop -n \\\"Process \\\"1\"],\n     \"cpus\": 150,\n     \"pool\": \"sharedpool\"\n   },\n   {\n     \"process\": \"/bin/sh\",\n     \"args\": [\"-c\", \"/thread_busyloop -n \\\"Process \\\"2\"],\n     \"pool\": \"sharedpool\",\n     \"cpus\": 10\n   } \n]\n}]\n"
+                    "bonc.k8s.io/cpus": "[{\n\"container\": \"cputestcontainer\",\n\"processes\":\n  [{\n     \"process\": \"/bin/sh\",\n     \"args\": [\"-c\",\"/thread_busyloop -n \\\"Process \\\"1\"],\n     \"cpus\": 150,\n     \"pool\": \"sharedpool\"\n   },\n   {\n     \"process\": \"/bin/sh\",\n     \"args\": [\"-c\", \"/thread_busyloop -n \\\"Process \\\"2\"],\n     \"pool\": \"sharedpool\",\n     \"cpus\": 10\n   } \n]\n}]\n"
                 }
             }
         },

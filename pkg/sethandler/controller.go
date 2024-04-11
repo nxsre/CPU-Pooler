@@ -8,9 +8,9 @@ import (
 	"github.com/nokia/CPU-Pooler/pkg/k8sclient"
 	"github.com/nokia/CPU-Pooler/pkg/topology"
 	"github.com/nokia/CPU-Pooler/pkg/types"
+	"github.com/nokia/CPU-Pooler/pkg/utils"
 	"golang.org/x/sys/unix"
 	"io"
-	"io/ioutil"
 	"k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,7 +20,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
+	"k8s.io/utils/cpuset"
+	"k8s.io/utils/temp"
 	"log"
 	"os"
 	"os/exec"
@@ -40,7 +41,7 @@ const (
 )
 
 var (
-	resourceBaseName       = "nokia.k8s.io"
+	resourceBaseName       = "bonc.k8s.io"
 	processConfigKey       = resourceBaseName + "/cpus"
 	setterAnnotationSuffix = "cpusets-configured"
 	setterAnnotationKey    = resourceBaseName + "/" + setterAnnotationSuffix
@@ -52,10 +53,11 @@ type workItem struct {
 	newPod *v1.Pod
 }
 
-//SetHandler is the data set encapsulating the configuration data needed for the CPUSetter Controller to be able to adjust cpusets
+// SetHandler is the data set encapsulating the configuration data needed for the CPUSetter Controller to be able to adjust cpusets
 type SetHandler struct {
 	poolConfig      types.PoolConfig
 	cpusetRoot      string
+	cpuRoot         string
 	k8sClient       kubernetes.Interface
 	informerFactory informers.SharedInformerFactory
 	podSynced       cache.InformerSynced
@@ -63,12 +65,12 @@ type SetHandler struct {
 	stopChan        *chan struct{}
 }
 
-//SetHandler returns the SetHandler data set
+// SetHandler returns the SetHandler data set
 func (setHandler SetHandler) SetHandler() SetHandler {
 	return setHandler
 }
 
-//SetSetHandler a setter for SetHandler
+// SetSetHandler a setter for SetHandler
 func (setHandler *SetHandler) SetSetHandler(poolconf types.PoolConfig, cpusetRoot string, k8sClient kubernetes.Interface) {
 	setHandler.poolConfig = poolconf
 	setHandler.cpusetRoot = cpusetRoot
@@ -76,9 +78,9 @@ func (setHandler *SetHandler) SetSetHandler(poolconf types.PoolConfig, cpusetRoo
 	setHandler.workQueue = workqueue.New()
 }
 
-//New creates a new SetHandler object
-//Can return error if in-cluster K8s API server client could not be initialized
-func New(kubeConf string, poolConfig types.PoolConfig, cpusetRoot string) (*SetHandler, error) {
+// New creates a new SetHandler object
+// Can return error if in-cluster K8s API server client could not be initialized
+func New(kubeConf string, poolConfig types.PoolConfig, cpusetRoot, cpuRoot string) (*SetHandler, error) {
 	cfg, err := clientcmd.BuildConfigFromFlags("", kubeConf)
 	if err != nil {
 		return nil, err
@@ -92,6 +94,7 @@ func New(kubeConf string, poolConfig types.PoolConfig, cpusetRoot string) (*SetH
 	setHandler := SetHandler{
 		poolConfig:      poolConfig,
 		cpusetRoot:      cpusetRoot,
+		cpuRoot:         cpuRoot,
 		k8sClient:       kubeClient,
 		informerFactory: kubeInformerFactory,
 		podSynced:       podInformer.HasSynced,
@@ -106,7 +109,7 @@ func New(kubeConf string, poolConfig types.PoolConfig, cpusetRoot string) (*SetH
 	return &setHandler, nil
 }
 
-//Run kicks the CPUSetter controller into motion, synchs it with the API server, and starts the desired number of asynch worker threads to handle the Pod API events
+// Run kicks the CPUSetter controller into motion, synchs it with the API server, and starts the desired number of asynch worker threads to handle the Pod API events
 func (setHandler *SetHandler) Run(threadiness int, stopCh *chan struct{}) error {
 	setHandler.stopChan = stopCh
 	setHandler.informerFactory.Start(*stopCh)
@@ -124,14 +127,14 @@ func (setHandler *SetHandler) Run(threadiness int, stopCh *chan struct{}) error 
 	return nil
 }
 
-//PodAdded handles ADD operations
+// PodAdded handles ADD operations
 func (setHandler *SetHandler) PodAdded(pod *v1.Pod) {
 	workItem := workItem{newPod: pod}
 	setHandler.workQueue.Add(workItem)
 }
 
-//WatchErrorHandler is an event handler invoked when the CPUSetter Controller's connection to the K8s API server breaks
-//In case the error is terminal it initiates a graceful shutdown for the whole Controller, implicitly restarting the connection by restarting the whole container
+// WatchErrorHandler is an event handler invoked when the CPUSetter Controller's connection to the K8s API server breaks
+// In case the error is terminal it initiates a graceful shutdown for the whole Controller, implicitly restarting the connection by restarting the whole container
 func (setHandler *SetHandler) WatchErrorHandler(r *cache.Reflector, err error) {
 	if apierrors.IsResourceExpired(err) || apierrors.IsGone(err) || err == io.EOF {
 		log.Println("INFO: One of the API watchers closed gracefully, re-establishing connection")
@@ -146,14 +149,14 @@ func (setHandler *SetHandler) WatchErrorHandler(r *cache.Reflector, err error) {
 	os.Exit(0)
 }
 
-//Stop is invoked by the main thread to initiate graceful shutdown procedure. It shuts down the event handler queue, and relays a stop signal to the Controller
+// Stop is invoked by the main thread to initiate graceful shutdown procedure. It shuts down the event handler queue, and relays a stop signal to the Controller
 func (setHandler *SetHandler) Stop() {
 	*setHandler.stopChan <- struct{}{}
 	setHandler.workQueue.ShutDown()
 }
 
-//StartReconciliation starts the reactive thread of SetHandler periodically checking expected and provisioned cpusets of the node
-//In case a container's observed cpuset differs from the expected (i.e. container was restarted) the thread resets it to the proper value
+// StartReconciliation starts the reactive thread of SetHandler periodically checking expected and provisioned cpusets of the node
+// In case a container's observed cpuset differs from the expected (i.e. container was restarted) the thread resets it to the proper value
 func (setHandler *SetHandler) StartReconciliation() {
 	go setHandler.startReconciliationLoop()
 	log.Println("INFO: Successfully started the periodic cpuset reconciliation thread")
@@ -228,7 +231,7 @@ func shouldPodBeHandled(pod v1.Pod) (bool, v1.Pod) {
 		}
 		time.Sleep(RetryInterval * time.Millisecond)
 	}
-	//Pod is still haven't been scheduled, or it wasn't scheduled to the Node of this specific CPUSetter instance
+	//Pod still haven't been scheduled, or it wasn't scheduled to the Node of this specific CPUSetter instance
 	if setterNodeName != pod.Spec.NodeName {
 		return false, pod
 	}
@@ -262,6 +265,7 @@ func gatherAllContainers(pod v1.Pod) map[string]int {
 func (setHandler *SetHandler) adjustContainerSets(pod v1.Pod, containersToBeSet map[string]int) error {
 	var (
 		pathToContainerCpusetFile string
+		pathToContainerCpusFile   string
 		err                       error
 	)
 	for _, container := range pod.Spec.Containers {
@@ -280,6 +284,11 @@ func (setHandler *SetHandler) adjustContainerSets(pod v1.Pod, containersToBeSet 
 		if err != nil {
 			return errors.New("cpuset of container: " + container.Name + " in Pod: " + pod.ObjectMeta.Name + " ID: " + string(pod.ObjectMeta.UID) + " could not be re-adjusted in thread:" + strconv.Itoa(unix.Gettid()) + " because:" + err.Error())
 		}
+		pathToContainerCpusFile, err = setHandler.applyCpusToContainer(pod.ObjectMeta, container.Name, containerID, cpuset)
+		if err != nil {
+			return errors.New("cpu of container: " + container.Name + " in Pod: " + pod.ObjectMeta.Name + " ID: " + string(pod.ObjectMeta.UID) + " could not be re-adjusted in thread:" + strconv.Itoa(unix.Gettid()) + " because:" + err.Error())
+		}
+		_ = pathToContainerCpusFile
 	}
 	err = setHandler.applyCpusetToInfraContainer(pod.ObjectMeta, pod.Status, pathToContainerCpusetFile)
 	if err != nil {
@@ -322,7 +331,7 @@ func (setHandler *SetHandler) determineCorrectCpuset(pod v1.Pod, container v1.Co
 
 func (setHandler *SetHandler) getListOfAllocatedExclusiveCpus(exclusivePoolName string, pod v1.Pod, container v1.Container) (cpuset.CPUSet, error) {
 	checkpointFileName := "/var/lib/kubelet/device-plugins/kubelet_internal_checkpoint"
-	buf, err := ioutil.ReadFile(checkpointFileName)
+	buf, err := os.ReadFile(checkpointFileName)
 	if err != nil {
 		log.Printf("Error reading file %s: Error: %v", checkpointFileName, err)
 		return cpuset.CPUSet{}, fmt.Errorf("kubelet checkpoint file could not be accessed because: %s", err)
@@ -353,15 +362,15 @@ func (setHandler *SetHandler) getListOfAllocatedExclusiveCpus(exclusivePoolName 
 }
 
 func calculateFinalExclusiveSet(exclusiveCpus []string, pod v1.Pod, container v1.Container) (cpuset.CPUSet, error) {
-	setBuilder := cpuset.NewBuilder()
+	setBuilder := cpuset.New()
 	for _, deviceID := range exclusiveCpus {
 		deviceIDasInt, err := strconv.Atoi(deviceID)
 		if err != nil {
 			return cpuset.CPUSet{}, err
 		}
-		setBuilder.Add(deviceIDasInt)
+		setBuilder = setBuilder.Union(cpuset.New(deviceIDasInt % runtime.NumCPU()))
 	}
-	return setBuilder.Result(), nil
+	return setBuilder, nil
 }
 
 func determineCid(podStatus v1.PodStatus, containerName string) string {
@@ -390,6 +399,76 @@ func containerIDInPodStatus(podStatus v1.PodStatus, containerDirName string) boo
 		}
 	}
 	return false
+}
+
+// 解压 CPU.tar 到容器内
+func (setHandler *SetHandler) applyCpusToContainer(podMeta metav1.ObjectMeta, containerName, containerID string, cpuSet cpuset.CPUSet) (string, error) {
+	containerCPURootBase := filepath.Join(setHandler.cpuRoot, podMeta.Namespace, podMeta.Name, containerName)
+	if exists, _ := utils.PathExists(containerCPURootBase); !exists {
+		if err := os.MkdirAll(containerCPURootBase, 0755); err != nil {
+			log.Println("创建失败", err)
+			return "", err
+		}
+	}
+
+	// 删除已存在目录
+	empty, _ := utils.IsEmpty(containerCPURootBase)
+	if !empty {
+		entries, err := os.ReadDir(containerCPURootBase)
+		if err != nil {
+			return "", err
+		}
+		for _, entry := range entries {
+			err := os.RemoveAll(filepath.Join(containerCPURootBase, entry.Name()))
+			if err != nil {
+				log.Println("删除失败", err)
+			}
+		}
+	}
+
+	tmpDir, err := temp.CreateTempDir(containerID)
+	if err != nil {
+		return "", err
+	}
+	file, err := utils.CPUFS.Open(utils.CPUInfrastructure)
+	if err != nil {
+		return "", err
+	}
+	if err := utils.UnTarGZ(tmpDir.Name, file); err != nil {
+		log.Println("CPU 解压失败", err)
+		return "", err
+	}
+
+	if err := utils.CopyDir(filepath.Join(tmpDir.Name, "cpu"), containerCPURootBase); err != nil {
+		log.Println("CPU 目录拷贝失败", tmpDir.Name, containerCPURootBase, err)
+		return "", err
+	}
+
+	var virtualCpuSet = cpuset.New(0)
+	if len(cpuSet.UnsortedList()) > 1 {
+		for id, _ := range cpuSet.UnsortedList()[1:] {
+			virtualCpuSet = virtualCpuSet.Union(cpuset.New(id + 1))
+			cpuZeroDir := filepath.Join(containerCPURootBase, "cpu0")
+			cpuNumDir := filepath.Join(containerCPURootBase, fmt.Sprintf("cpu%d", id+1))
+			if err := os.MkdirAll(cpuNumDir, 0755); err != nil {
+				log.Println("创建目录失败", err)
+				return "", err
+			}
+			if err := utils.CopyDir(cpuZeroDir, cpuNumDir); err != nil {
+				log.Println("CPUID 拷贝失败", err)
+				return "", err
+			}
+		}
+	}
+
+	for _, file := range []string{"online", "possible", "present"} {
+		filePath := filepath.Join(containerCPURootBase, file)
+		if err := os.WriteFile(filePath, []byte(virtualCpuSet.String()), 0644); err != nil {
+			log.Println("CPU 数量写入失败", err)
+			return "", err
+		}
+	}
+	return "", nil
 }
 
 func (setHandler *SetHandler) applyCpusetToContainer(podMeta metav1.ObjectMeta, containerID string, cpuset cpuset.CPUSet) (string, error) {
@@ -520,8 +599,8 @@ func (setHandler *SetHandler) getLeafCpusets() ([]string, error) {
 	return cpusetLeaves, nil
 }
 
-//Naive approach: we can prob afford not building a tree from the cgroup paths if we only reconcile every couple of seconds
-//Can be further optimized on need
+// Naive approach: we can prob afford not building a tree from the cgroup paths if we only reconcile every couple of seconds
+// Can be further optimized on need
 func (setHandler *SetHandler) reconcileContainer(leafCpusets []string, pod v1.Pod, container v1.Container) error {
 	containerID := determineCid(pod.Status, container.Name)
 	if containerID == "" {
@@ -531,7 +610,7 @@ func (setHandler *SetHandler) reconcileContainer(leafCpusets []string, pod v1.Po
 	badCpuset, _ := cpuset.Parse("0-" + strconv.Itoa(numOfCpus-1))
 	for _, leaf := range leafCpusets {
 		if strings.Contains(leaf, containerID) {
-			currentCpusetByte, _ := ioutil.ReadFile(leaf + "/cpuset.cpus")
+			currentCpusetByte, _ := os.ReadFile(leaf + "/cpuset.cpus")
 			currentCpusetStr := strings.TrimSpace(string(currentCpusetByte))
 			currentCpuset, _ := cpuset.Parse(currentCpusetStr)
 			if badCpuset.Equals(currentCpuset) {

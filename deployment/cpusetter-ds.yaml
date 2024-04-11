@@ -17,6 +17,7 @@ rules:
   - get
   - list
   - watch
+  - patch
 - apiGroups:
   - ""
   resources:
@@ -56,10 +57,10 @@ spec:
     spec:
       containers:
       - name: cpu-device-plugin
-        image: cpusetter
+        image: docker.io/library/cpusetter
         imagePullPolicy: IfNotPresent
         ##--cpusetroot needs to be set to the root of the cgroupfs hierarchy used by Kubelet for workloads
-        command: [ "/cpusetter", "--poolconfigs=/etc/cpu-pooler", "--cpusetroot=/rootfs/sys/fs/cgroup/cpuset/kubepods" ]
+        command: [ "/cpusetter", "--poolconfigs=/etc/cpu-pooler", "--cpusetroot=/rootfs/sys/fs/cgroup/cpuset/kubepods", "--cpuroot=/rootfs/sys/devices/system/cpu"]
         resources:
           requests:
             cpu: "10m"
@@ -70,6 +71,11 @@ spec:
          - mountPath: /etc/cpu-pooler
            name: cpu-pooler-config
         ## -- do not mount kubepods under /sys to avoid circular linking
+         - mountPath: /sys/devices/system/cpu/
+           name: system-cpu
+         - mountPath: /rootfs/sys/devices/system/cpu/
+           name: containers-cpu
+           mountPropagation: Bidirectional
          - mountPath: /rootfs/sys/fs/cgroup/cpuset/kubepods/
            name: kubepods
          - mountPath: /var/lib/kubelet/device-plugins/
@@ -90,6 +96,12 @@ spec:
       - name: checkpointfile
         hostPath:
          path: /var/lib/kubelet/device-plugins/
+      - name: containers-cpu
+        hostPath:
+         path: /var/lib/kubelet/pods/sys/devices/system/cpu/
+      - name: system-cpu
+        hostPath:
+         path: /sys/devices/system/cpu/
       - name: kubepods
         hostPath:
          path: /sys/fs/cgroup/cpuset/kubepods/
