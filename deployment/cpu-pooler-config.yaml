@@ -16,7 +16,6 @@ data:
       exclusive-pool-cloudphone-2:
         cpus : "64-127"
         hyperThreadingPolicy: multiThreaded
-        
       shared-pool:
         cpus : "10-63"
       default:
