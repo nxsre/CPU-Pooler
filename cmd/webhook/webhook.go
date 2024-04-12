@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	v1 "k8s.io/api/admission/v1"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/nokia/CPU-Pooler/pkg/types"
-	"k8s.io/api/admission/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,7 +31,7 @@ const (
 var (
 	scheme             = runtime.NewScheme()
 	codecs             = serializer.NewCodecFactory(scheme)
-	resourceBaseName   = "nokia.k8s.io"
+	resourceBaseName   = "bonc.k8s.io"
 	processStarterPath = "/opt/bin/process-starter"
 	certFile           string
 	keyFile            string
@@ -52,8 +52,8 @@ type patch struct {
 	Value json.RawMessage `json:"value"`
 }
 
-func toAdmissionResponse(err error) *v1beta1.AdmissionResponse {
-	return &v1beta1.AdmissionResponse{
+func toAdmissionResponse(err error) *v1.AdmissionResponse {
+	return &v1.AdmissionResponse{
 		Result: &metav1.Status{
 			Message: err.Error(),
 		},
@@ -114,7 +114,7 @@ func validateAnnotation(poolRequests poolRequestMap, cpuAnnotation types.CPUAnno
 				return fmt.Errorf("Container %s; Pool %s in annotation not found from resources", cName, pool)
 			}
 			// cpu request in annotation can be twice as exclusive pool request in resources in case of HT is enabled (HT policy is "multiThreaded")
-			if cpuAnnotation.ContainerTotalCPURequest(pool, cName) > 2 * value {
+			if cpuAnnotation.ContainerTotalCPURequest(pool, cName) > 2*value {
 				return fmt.Errorf("Exclusive CPU requests %d do not match to annotation %d",
 					cPoolRequests.pools[pool],
 					cpuAnnotation.ContainerTotalCPURequest(pool, cName))
@@ -243,11 +243,18 @@ func patchContainerForPinning(cpuAnnotation types.CPUAnnotation, patchList []pat
 	patchList = append(patchList, patchItem)
 
 	// hostbin volumeMount. Location for process starter binary
-
 	patchItem.Path = "/spec/containers/" + strconv.Itoa(i) + "/volumeMounts/-"
 	contVolumePatch := `{"name":"hostbin","mountPath":"` + processStarterPath + `","readOnly":true}`
 	patchItem.Value =
 		json.RawMessage(contVolumePatch)
+	patchList = append(patchList, patchItem)
+
+	// cpu volumeMount.
+	patchItem.Path = "/spec/containers/" + strconv.Itoa(i) + "/volumeMounts/-"
+	contCPUVolumePatch := `{"name":"` + fmt.Sprintf("cpu-%s", c.Name) + `","mountPath":"/sys/devices/system/cpu",
+							"readOnly":true,"mountPropagation":"HostToContainer"}`
+	patchItem.Value =
+		json.RawMessage(contCPUVolumePatch)
 	patchList = append(patchList, patchItem)
 
 	// Container name to env variable
@@ -281,7 +288,7 @@ func patchContainerForPinning(cpuAnnotation types.CPUAnnotation, patchList []pat
 	return patchList, nil
 }
 
-func patchVolumesForPinning(patchList []patch) []patch {
+func patchVolumesForPinning(patchList []patch, pod corev1.Pod) []patch {
 	var patchItem patch
 	patchItem.Op = "add"
 
@@ -294,10 +301,19 @@ func patchVolumesForPinning(patchList []patch) []patch {
 	volumePathPatch := `{"name":"hostbin","hostPath":{ "path":"` + processStarterPath + `"} }`
 	patchItem.Value = json.RawMessage(volumePathPatch)
 	patchList = append(patchList, patchItem)
+	for _, container := range pod.Spec.Containers {
+		// cpu volume
+		patchItem.Path = "/spec/volumes/-"
+		cpuVolumePathPatch := `{"name":"` + fmt.Sprintf("cpu-%s", container.Name) + `","hostPath":{ "path":"` +
+			fmt.Sprintf("/var/lib/kubelet/pods/sys/devices/system/cpu/%s/%s/%s", pod.Namespace, pod.Name, container.Name) +
+			`","type": "DirectoryOrCreate" }}`
+		patchItem.Value = json.RawMessage(cpuVolumePathPatch)
+		patchList = append(patchList, patchItem)
+	}
 	return patchList
 }
 
-func mutatePods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
+func mutatePods(ar v1.AdmissionReview) *v1.AdmissionResponse {
 	glog.V(2).Info("mutating pods")
 	var (
 		patchList         []patch
@@ -319,7 +335,7 @@ func mutatePods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 		glog.Error(err)
 		return toAdmissionResponse(err)
 	}
-	reviewResponse := v1beta1.AdmissionResponse{}
+	reviewResponse := v1.AdmissionResponse{}
 
 	annotationName := annotationNameFromConfig()
 
@@ -395,7 +411,7 @@ func mutatePods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 			}
 		}
 		if !exists {
-			patchList = patchVolumesForPinning(patchList)
+			patchList = patchVolumesForPinning(patchList, pod)
 		}
 	} else if podAnnotationExists {
 		glog.Errorf("CPU annotation exists but no container was patched %v:%v",
@@ -411,7 +427,7 @@ func mutatePods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 			return toAdmissionResponse(err)
 		}
 		reviewResponse.Patch = []byte(patch)
-		pt := v1beta1.PatchTypeJSONPatch
+		pt := v1.PatchTypeJSONPatch
 		reviewResponse.PatchType = &pt
 	}
 
@@ -433,9 +449,15 @@ func serveMutatePod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestedAdmissionReview := v1beta1.AdmissionReview{}
+	requestedAdmissionReview := v1.AdmissionReview{}
 
-	responseAdmissionReview := v1beta1.AdmissionReview{}
+	// 添加默认 TypeMeta ,否则创建资源会报 "expected webhook response of admission.k8s.io/v1, Kind=AdmissionReview, got /, Kind="
+	responseAdmissionReview := v1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "AdmissionReview",
+			APIVersion: "admission.k8s.io/v1",
+		},
+	}
 
 	deserializer := codecs.UniversalDeserializer()
 	if _, _, err := deserializer.Decode(body, nil, &requestedAdmissionReview); err != nil {

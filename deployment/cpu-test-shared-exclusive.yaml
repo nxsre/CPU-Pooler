@@ -14,10 +14,10 @@ spec:
     resources:
       requests:
         memory: 2000Mi
-        nokia.k8s.io/exclusive-pool: "2"
-        nokia.k8s.io/shared-pool: "500"
+        bonc.k8s.io/exclusive-pool: "2"
+        bonc.k8s.io/shared-pool: "500"
       limits:
         memory: 2000Mi
-        nokia.k8s.io/exclusive-pool: "2"
-        nokia.k8s.io/shared-pool: "500"
+        bonc.k8s.io/exclusive-pool: "2"
+        bonc.k8s.io/shared-pool: "500"
 

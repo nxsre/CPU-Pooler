@@ -18,6 +18,7 @@ import (
 
 var (
 	wildcardFakeCpuSetPath  = "/tmp/sethandler-*/sys/fs/cgroup/cpuset"
+	wildcardFakeCpusPath    = "/tmp/sethandler-*/sys/devices/system/cpu"
 	testPoolConf1, _        = types.ReadPoolConfigFile("../../testdata/testpoolconfig1.yaml")
 	testPoolConf2, _        = types.ReadPoolConfigFile("../../testdata/testpoolconfig2.yaml")
 	singleThreadPoolConf, _ = types.ReadPoolConfigFile("../../testdata/singleThreadExclusive.yaml")
@@ -34,35 +35,35 @@ var testPods = []v1.Pod{
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_shared", UID: "pod0001"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "cont_shared", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/shared_caas": quantity100m}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/shared_caas": quantity100m}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "cont_shared", Ready: true, ContainerID: "docker://cont01"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_exc", UID: "pod0002"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "cont_exc", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity2}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity2}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "cont_exc", Ready: true, ContainerID: "docker://cont02"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_excl_two_container", UID: "pod0003"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{
-			{Name: "cont_excl1", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity2}}},
-			{Name: "cont_excl2", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity3}}}}},
+			{Name: "cont_excl1", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity2}}},
+			{Name: "cont_excl2", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity3}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{
 			{Name: "cont_excl1", Ready: true, ContainerID: "docker://cont03a"},
 			{Name: "cont_excl2", Ready: true, ContainerID: "docker://cont03b"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_two_container_sh_exc", UID: "pod0004"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{
-			{Name: "cont_exclusive", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity1}}},
-			{Name: "cont_shared", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"nokia.k8s.io/shared_caas": quantity100m}}}}},
+			{Name: "cont_exclusive", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity1}}},
+			{Name: "cont_shared", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"bonc.k8s.io/shared_caas": quantity100m}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{
 			{Name: "cont_exclusive", Ready: true, ContainerID: "docker://cont04a"},
 			{Name: "cont_shared", Ready: true, ContainerID: "docker://cont04b"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_three_cont_sh_exc_def", UID: "pod0005"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{
-			{Name: "cont_exclusive", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity1}}},
-			{Name: "cont_shared", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"nokia.k8s.io/shared_caas": quantity100m}}},
-			{Name: "cont_default", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"nokia.k8s.io/default_caas": quantity1}}}}},
+			{Name: "cont_exclusive", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity1}}},
+			{Name: "cont_shared", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"bonc.k8s.io/shared_caas": quantity100m}}},
+			{Name: "cont_default", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"bonc.k8s.io/default_caas": quantity1}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{
 			{Name: "cont_exclusive", Ready: true, ContainerID: "docker://cont05a"},
 			{Name: "cont_shared", Ready: true, ContainerID: "docker://cont05b"},
@@ -70,7 +71,7 @@ var testPods = []v1.Pod{
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_default_explicit", UID: "pod0006"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "cont_default_explicit", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/default": quantity1}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/default": quantity1}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "cont_default_explicit", Ready: true, ContainerID: "docker://cont06"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_default_implicit", UID: "pod0007"},
@@ -78,95 +79,95 @@ var testPods = []v1.Pod{
 		Status:     v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "cont_default_implicit", Ready: true, ContainerID: "docker://cont07"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_exc_pin_2_proc_2_cont", UID: "pod0008",
-			Annotations: map[string]string{"nokia.k8s.io/cpus": "[" +
+			Annotations: map[string]string{"bonc.k8s.io/cpus": "[" +
 				"{\"container\": \"cont_exc_pin1\", \"processes\": [{ \"process\": \"/bin/sh\", \"args\": [\"-c\", \"sleep  8;\"], \"pool\": \"exclusive_caas\", \"cpus\": 2 }]}," +
 				"{\"container\": \"cont_exc_pin2\", \"processes\": [{ \"process\": \"/bin/sh\", \"args\": [\"-c\", \"sleep 88;\"], \"pool\": \"exclusive_caas\", \"cpus\": 2 }]}	]"}},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{
-			{Name: "cont_exc_pin1", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity2}}},
-			{Name: "cont_exc_pin2", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity2}}}}},
+			{Name: "cont_exc_pin1", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity2}}},
+			{Name: "cont_exc_pin2", Resources: v1.ResourceRequirements{Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity2}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{
 			{Name: "cont_exc_pin1", Ready: true, ContainerID: "docker://cont08a"},
 			{Name: "cont_exc_pin2", Ready: true, ContainerID: "docker://cont08b"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_exc_pin_2_proc_1_cont", UID: "pod0009",
-			Annotations: map[string]string{"nokia.k8s.io/cpus": "[{\"container\": \"cont_exc_pin\", \"processes\": [" +
+			Annotations: map[string]string{"bonc.k8s.io/cpus": "[{\"container\": \"cont_exc_pin\", \"processes\": [" +
 				"{ \"process\": \"/bin/sh\", \"args\": [\"-c\", \"sleep 9; \"], \"pool\": \"exclusive_caas\", \"cpus\": 1 }," +
 				"{ \"process\": \"/bin/sh\", \"args\": [\"-c\", \"sleep 99;\"], \"pool\": \"exclusive_caas\", \"cpus\": 1 }]}]"}},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "cont_exc_pin", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity2}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity2}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "cont_exc_pin", Ready: true, ContainerID: "docker://cont09"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_pin_2_proc_exc_shared", UID: "pod0010",
-			Annotations: map[string]string{"nokia.k8s.io/cpus": "[{\"container\": \"cont_pin_exc_shared\", \"processes\": [" +
+			Annotations: map[string]string{"bonc.k8s.io/cpus": "[{\"container\": \"cont_pin_exc_shared\", \"processes\": [" +
 				"{ \"process\": \"/bin/sh\", \"args\": [\"-c\", \"sleep 10; \"], \"pool\": \"exclusive_caas\", \"cpus\": 1 }," +
 				"{ \"process\": \"/bin/sh\", \"args\": [\"-c\", \"sleep 1010;\"], \"pool\": \"shared_caas\", \"cpus\": 200 }]}]"}},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "cont_pin_exc_shared", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity1, "nokia.k8s.io/shared_caas": quantity100m}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity1, "bonc.k8s.io/shared_caas": quantity100m}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "cont_pin_exc_shared", Ready: true, ContainerID: "docker://cont10"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_empty_cont_statuses", UID: "pod0011"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "pod_empty_cont_statuses", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity3}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity3}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "nodename_missing", UID: "pod0012"},
 		Spec: v1.PodSpec{Containers: []v1.Container{{Name: "nodename_missing", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity2}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity2}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "nodename_missing", Ready: true, ContainerID: "docker://cont12"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_cont_name_and_id_empty", UID: "pod0013"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "pod_cont_name_and_id_empty", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity1}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity1}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "", Ready: true, ContainerID: ""}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "chckpnt_no_device", UID: "pod0014"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "chckpnt_no_device", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity1}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity1}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "chckpnt_no_device", Ready: true, ContainerID: "docker://cont14"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "chckpnt_no_res", UID: "pod0015"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "chckpnt_no_res", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity1}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity1}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "chckpnt_no_res", Ready: true, ContainerID: "docker://cont15"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "chckpnt_no_device_no_res", UID: "pod0016"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "chckpnt_no_device_no_res", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity2}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity2}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "chckpnt_no_device_no_res", Ready: true, ContainerID: "docker://cont16"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "no_chckpnt_entry", UID: "pod0017"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "no_chckpnt_entry", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity2}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity2}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "no_chckpnt_entry", Ready: true, ContainerID: "docker://cont17"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "missing_objmeta_uid"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "missing_objmeta_uid", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity1}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity1}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "missing_objmeta_uid", Ready: true, ContainerID: "docker://cont18"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "bad_deviceID_format", UID: "pod0019"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "bad_deviceID_format", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity2}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity2}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "bad_deviceID_format", Ready: true, ContainerID: "docker://cont19"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "no_cpuset_file", UID: "pod0020"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "no_cpuset_file", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity3}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity3}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "no_cpuset_file", Ready: true, ContainerID: "docker://cont20"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "naming_mismatch", UID: "pod0021"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "naming_mismatch1", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity1}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity1}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "naming_mismatch2", Ready: true, ContainerID: "docker://cont21"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_default_explicit_no_default_pool", UID: "pod0022"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "cont_default_explicit_no_default_pool", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/default": quantity1}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/default": quantity1}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "cont_default_explicit_no_default_pool", Ready: true, ContainerID: "docker://cont22"}}}},
 	v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod_ht_test", UID: "pod0023"},
 		Spec: v1.PodSpec{NodeName: "caas_master", Containers: []v1.Container{{Name: "cont_exc_ht", Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{"nokia.k8s.io/exclusive_caas": quantity2}}}}},
+			Requests: v1.ResourceList{"bonc.k8s.io/exclusive_caas": quantity2}}}}},
 		Status: v1.PodStatus{Phase: "Running", ContainerStatuses: []v1.ContainerStatus{{Name: "cont_exc_ht", Ready: true, ContainerID: "docker://cont23"}}}},
 }
 
@@ -229,7 +230,7 @@ var podAddedTcs = []struct {
 }
 
 func TestNew(t *testing.T) {
-	sh, err := sethandler.New(testKubeconfPath, testPoolConf1, getFakeCpusetRoot(wildcardFakeCpuSetPath))
+	sh, err := sethandler.New(testKubeconfPath, testPoolConf1, getFakeCpusetRoot(wildcardFakeCpuSetPath), getFakeCpusRoot(wildcardFakeCpusPath))
 	if err != nil || sh == nil {
 		t.Errorf("Sethandler object creation failed because: %s", err.Error())
 	}
@@ -284,6 +285,15 @@ func setupTestSethandler(poolConf types.PoolConfig) sethandler.SetHandler {
 
 func getFakeCpusetRoot(cpusetPath string) string {
 	paths, _ := filepath.Glob(cpusetPath)
+	var p string
+	for _, path := range paths {
+		p = path
+	}
+	return p
+}
+
+func getFakeCpusRoot(cpusPath string) string {
+	paths, _ := filepath.Glob(cpusPath)
 	var p string
 	for _, path := range paths {
 		p = path

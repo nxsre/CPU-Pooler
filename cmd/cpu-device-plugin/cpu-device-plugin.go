@@ -3,11 +3,13 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -19,11 +21,11 @@ import (
 	"golang.org/x/net/context"
 	grpc "google.golang.org/grpc"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
-	"k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
+	"k8s.io/utils/cpuset"
 )
 
 var (
-	resourceBaseName = "nokia.k8s.io"
+	resourceBaseName = "bonc.k8s.io"
 	cdms             []*cpuDeviceManager
 )
 
@@ -35,13 +37,16 @@ type cpuDeviceManager struct {
 	poolType       string
 	nodeTopology   map[int]int
 	htTopology     map[int]string
+	numCPU         int
 }
 
-//TODO: PoC if cpuset setting could be implemented in this hook? cpuset cgroup of the container should already exist at this point (kinda)
-//The DeviceIDs could be used to determine which container has them, once we have a container name parsed out from the allocation backend we could manipulate its cpuset before it is even started
-//Long shot, but if it works both cpusetter and process starter would become unnecessary
+// TODO: PoC if cpuset setting could be implemented in this hook? cpuset cgroup of the container should already exist at this point (kinda)
+// The DeviceIDs could be used to determine which container has them, once we have a container name parsed out from the allocation backend we could manipulate its cpuset before it is even started
+// Long shot, but if it works both cpusetter and process starter would become unnecessary
 func (cdm *cpuDeviceManager) PreStartContainer(ctx context.Context, psRqt *pluginapi.PreStartContainerRequest) (*pluginapi.PreStartContainerResponse, error) {
-	return &pluginapi.PreStartContainerResponse{}, nil
+	log.Printf("psRqt :%+v", psRqt.DevicesIDs)
+	resp := &pluginapi.PreStartContainerResponse{}
+	return resp, nil
 }
 
 func (cdm *cpuDeviceManager) Start() error {
@@ -92,6 +97,7 @@ func (cdm *cpuDeviceManager) Stop() error {
 	return cdm.cleanup()
 }
 
+// ListAndWatch 注册 CPU 数量
 func (cdm *cpuDeviceManager) ListAndWatch(e *pluginapi.Empty, stream pluginapi.DevicePlugin_ListAndWatchServer) error {
 	var updateNeeded = true
 	for {
@@ -104,13 +110,20 @@ func (cdm *cpuDeviceManager) ListAndWatch(e *pluginapi.Empty, stream pluginapi.D
 					resp.Devices = append(resp.Devices, &pluginapi.Device{ID: cpuID, Health: pluginapi.Healthy})
 				}
 			} else {
-				for _, cpuID := range cdm.pool.CPUset.ToSlice() {
-					exclusiveCore := pluginapi.Device{ID: strconv.Itoa(cpuID), Health: pluginapi.Healthy}
-					if numaNode, exists := cdm.nodeTopology[cpuID]; exists {
-						exclusiveCore.Topology = &pluginapi.TopologyInfo{Nodes: []*pluginapi.NUMANode{{ID: int64(numaNode)}}}
+				for _, cpuID := range cdm.pool.CPUset.List() {
+					// 根据超售率设置 CPU Core 数量
+					if cdm.pool.Overcommitment < 1 {
+						cdm.pool.Overcommitment = 1
 					}
-					resp.Devices = append(resp.Devices, &exclusiveCore)
+					for overID := 0; overID < cdm.pool.Overcommitment; overID++ {
+						exclusiveCore := pluginapi.Device{ID: strconv.Itoa(cpuID + overID*cdm.numCPU), Health: pluginapi.Healthy}
+						if numaNode, exists := cdm.nodeTopology[cpuID+overID*cdm.numCPU]; exists {
+							exclusiveCore.Topology = &pluginapi.TopologyInfo{Nodes: []*pluginapi.NUMANode{{ID: int64(numaNode)}}}
+						}
+						resp.Devices = append(resp.Devices, &exclusiveCore)
+					}
 				}
+				log.Printf("%+v +++ %v", resp.Devices, resp.String())
 			}
 			if err := stream.Send(resp); err != nil {
 				glog.Errorf("Error. Cannot update device states: %v\n", err)
@@ -131,7 +144,12 @@ func (cdm *cpuDeviceManager) Allocate(ctx context.Context, rqt *pluginapi.Alloca
 		envmap := make(map[string]string)
 		cpusAllocated, _ := cpuset.Parse("")
 		for _, id := range container.DevicesIDs {
-			tempSet, _ := cpuset.Parse(id)
+			idN, err := strconv.ParseUint(id, 10, 32)
+			if err != nil {
+				continue
+			}
+			log.Println("分配CPU:", int(idN)%cdm.numCPU)
+			tempSet, _ := cpuset.Parse(strconv.Itoa(int(idN) % cdm.numCPU))
 			cpusAllocated = cpusAllocated.Union(tempSet)
 		}
 		if cdm.pool.HTPolicy == types.MultiThreadHTPolicy {
@@ -154,8 +172,8 @@ func (cdm *cpuDeviceManager) Allocate(ctx context.Context, rqt *pluginapi.Alloca
 
 func (cdm *cpuDeviceManager) GetDevicePluginOptions(context.Context, *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {
 	dpOptions := pluginapi.DevicePluginOptions{
-		PreStartRequired:                false,
-		GetPreferredAllocationAvailable: false,
+		PreStartRequired:                true, // 开启 PreStartContainer
+		GetPreferredAllocationAvailable: true, // 开启 GetPreferredAllocation
 	}
 	return &dpOptions, nil
 }
@@ -185,20 +203,46 @@ func (cdm *cpuDeviceManager) Register(kubeletEndpoint, resourceName string) erro
 	return nil
 }
 
-func (cdm *cpuDeviceManager) GetPreferredAllocation(context.Context, *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
-	return &pluginapi.PreferredAllocationResponse{}, nil
+// GetPreferredAllocation 优选 CPU, 用于优化 CPU 复用分配
+func (cdm *cpuDeviceManager) GetPreferredAllocation(ctx context.Context, req *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
+	//log.Printf("req %+v", req.String())
+	resp := &pluginapi.PreferredAllocationResponse{}
+	for _, c := range req.ContainerRequests {
+		preferredID := []string{}
+		idSet := map[int]struct{}{}
+		log.Println("ContainerRequest::", c.AvailableDeviceIDs, c.AllocationSize)
+		for _, n := range c.AvailableDeviceIDs {
+			id, err := strconv.Atoi(n)
+			if err != nil {
+				continue
+			}
+			if _, exists := idSet[id%cdm.numCPU]; exists {
+				continue
+			}
+			preferredID = append(preferredID, strconv.Itoa(id))
+			idSet[id%cdm.numCPU] = struct{}{}
+
+			if len(preferredID) == int(c.AllocationSize) {
+				break
+			}
+		}
+		resp.ContainerResponses = append(resp.ContainerResponses, &pluginapi.ContainerPreferredAllocationResponse{DeviceIDs: preferredID})
+	}
+	return resp, nil
 }
 
 func newCPUDeviceManager(poolName string, pool types.Pool, sharedCPUs string) *cpuDeviceManager {
 	glog.Infof("Starting plugin for pool: %s", poolName)
-	return &cpuDeviceManager{
+	cdm := &cpuDeviceManager{
 		pool:           pool,
 		socketFile:     fmt.Sprintf("cpudp_%s.sock", poolName),
 		sharedPoolCPUs: sharedCPUs,
 		poolType:       types.DeterminePoolType(poolName),
 		nodeTopology:   topology.GetNodeTopology(),
 		htTopology:     topology.GetHTTopology(),
+		numCPU:         runtime.NumCPU(),
 	}
+	return cdm
 }
 
 func validatePools(poolConf types.PoolConfig) (string, error) {
@@ -277,6 +321,7 @@ func createPluginsForPools() error {
 
 func main() {
 	flag.Parse()
+	// 监听 kubelet.sock ，如果 kubelet.sock 有变更事件，则重启 device-plugin 注册
 	watcher, _ := fsnotify.NewWatcher()
 	watcher.Add(path.Join(pluginapi.DevicePluginPath, "kubelet.sock"))
 	defer watcher.Close()
