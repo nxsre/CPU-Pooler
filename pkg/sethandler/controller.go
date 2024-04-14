@@ -133,6 +133,17 @@ func (setHandler *SetHandler) PodAdded(pod *v1.Pod) {
 	setHandler.workQueue.Add(workItem)
 }
 
+// PodChanged handles UPDATE operations
+func (setHandler *SetHandler) PodChanged(oldPod, newPod v1.Pod) {
+	//The maze wasn't meant for you either
+	log.Println("oldPod ---->", oldPod.Namespace, oldPod.Name, oldPod.Status.Phase)
+	log.Println("newPod ---->", newPod.Namespace, newPod.Name, newPod.Status.Phase)
+	if newPod.Status.Phase != v1.PodRunning {
+		return
+	}
+	setHandler.handlePods(workItem{oldPod: &oldPod, newPod: &newPod})
+}
+
 // WatchErrorHandler is an event handler invoked when the CPUSetter Controller's connection to the K8s API server breaks
 // In case the error is terminal it initiates a graceful shutdown for the whole Controller, implicitly restarting the connection by restarting the whole container
 func (setHandler *SetHandler) WatchErrorHandler(r *cache.Reflector, err error) {
@@ -212,6 +223,7 @@ func (setHandler *SetHandler) handlePods(item workItem) {
 
 func shouldPodBeHandled(pod v1.Pod) (bool, v1.Pod) {
 	// Pod has exited/completed and all containers have stopped
+	log.Println("pod 状态:", pod.Namespace, pod.Name, pod.Status.Phase)
 	if pod.Status.Phase == v1.PodSucceeded || pod.Status.Phase == v1.PodFailed {
 		return false, pod
 	}
