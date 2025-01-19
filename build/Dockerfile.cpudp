@@ -1,20 +1,26 @@
 # Build stage
-FROM golang:1.22.2-alpine3.19 AS build-env
+#FROM golang:1.23.2-alpine3.19 AS build-env
+# 使用 musl 跨平台编译 CC=/usr/local/musl/bin/aarch64-unknown-linux-musl-gcc
+FROM docker.io/library/musl:go1.23.2-aarch64 AS build-env
 ARG PLUGIN_PATH=github.com/nokia/CPU-Pooler
 
-RUN apk add curl git
+#RUN apk add curl git
+RUN apt-get update -y && apt-get install -y libudev-dev
+
 WORKDIR ${GOPATH}/src/${PLUGIN_PATH}
 ADD go.* ./
+ADD toolkit /opt/workspaces/cph/toolkit
+
 RUN go mod download
 ADD . ./
-RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-extldflags "-static"' -o cpu-device-plugin ${PLUGIN_PATH}/cmd/cpu-device-plugin
+#RUN CGO_ENABLED=1 GOOS=linux go build -a -ldflags '-extldflags "-static"' -o cpu-device-plugin ${PLUGIN_PATH}/cmd/cpu-device-plugin
+RUN CGO_ENABLED=1 GOOS=linux go build -a -o cpu-device-plugin ${PLUGIN_PATH}/cmd/cpu-device-plugin
 
 
 # Final image creation
-FROM alpine:latest
+FROM ubuntu:noble
 ARG PLUGIN_PATH=github.com/nokia/CPU-Pooler
-
-RUN apk add util-linux
+ADD ./pci.ids /usr/share/hwdata/
 COPY --from=build-env /go/src/${PLUGIN_PATH}/cpu-device-plugin /
 
 ENTRYPOINT ["/cpu-device-plugin"]

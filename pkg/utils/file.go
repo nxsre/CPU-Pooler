@@ -48,8 +48,8 @@ func IsEmpty(name string) (bool, error) {
 	}
 	defer f.Close()
 
-	_, err = f.Readdir(1)
-	if err == io.EOF {
+	fis, err := os.ReadDir(name)
+	if err == io.EOF && len(fis) == 0 {
 		return true, nil
 	}
 	return false, err

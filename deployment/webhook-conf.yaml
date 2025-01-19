@@ -1,16 +1,19 @@
 ---
+# 配置参考
+# https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/extensible-admission-controllers/#webhook-configuration
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
-  name: cpu-device-pod-mutator-webhook-config
+  name: cph-cpu-device-pod-mutator-webhook-config
 webhooks:
   - name: cpu-dev-mutator.bonc.k8s.io
     sideEffects: NoneOnDryRun
     admissionReviewVersions: ["v1"]
+    reinvocationPolicy: IfNeeded
     clientConfig:
       service:
         name: cpu-dev-pod-mutator-svc
-        namespace: kube-system
+        namespace: kube-plugins
         path: "/mutating-pods"
       caBundle: "${CA_BUNDLE}"
     rules:
@@ -18,4 +21,7 @@ webhooks:
         apiGroups: [""]
         apiVersions: ["v1"]
         resources: ["pods"]
+    objectSelector:
+      matchLabels:
+        cpu-pooler: "cloudphone-pool-ex"
     failurePolicy: Fail

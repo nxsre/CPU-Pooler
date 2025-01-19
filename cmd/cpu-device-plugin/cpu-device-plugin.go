@@ -3,21 +3,27 @@ package main
 import (
 	"flag"
 	"fmt"
+	jsoniter "github.com/json-iterator/go"
+	"github.com/nokia/CPU-Pooler/pkg/utils"
+	"github.com/smallnest/weighted"
+	"google.golang.org/grpc/credentials/insecure"
 	"log"
+	"math"
 	"net"
 	"os"
 	"os/signal"
 	"path"
 	"path/filepath"
-	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/golang/glog"
-	"github.com/nokia/CPU-Pooler/pkg/topology"
 	"github.com/nokia/CPU-Pooler/pkg/types"
+	"github.com/nxsre/toolkit/pkg/topology"
 	"golang.org/x/net/context"
 	grpc "google.golang.org/grpc"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
@@ -30,27 +36,41 @@ var (
 )
 
 type cpuDeviceManager struct {
-	pool           types.Pool
-	socketFile     string
-	grpcServer     *grpc.Server
-	sharedPoolCPUs string
-	poolType       string
-	nodeTopology   map[int]int
-	htTopology     map[int]string
-	numCPU         int
+	pool               types.Pool
+	socketFile         string
+	devicePluginPath   string
+	grpcServer         *grpc.Server
+	sharedPoolCPUs     string
+	poolType           string
+	nodeTopology       map[int]int // core node 对应关系
+	htTopology         map[int]string
+	cloudphoneCPU      weighted.W
+	cloudphoneExtDevs  map[int]*weighted.SW
+	cloudphoneCPUTopol map[int]topology.Topology
+	cacheDevices       map[string]pluginapi.Device
+	numCPU             int
 }
 
 // TODO: PoC if cpuset setting could be implemented in this hook? cpuset cgroup of the container should already exist at this point (kinda)
 // The DeviceIDs could be used to determine which container has them, once we have a container name parsed out from the allocation backend we could manipulate its cpuset before it is even started
 // Long shot, but if it works both cpusetter and process starter would become unnecessary
 func (cdm *cpuDeviceManager) PreStartContainer(ctx context.Context, psRqt *pluginapi.PreStartContainerRequest) (*pluginapi.PreStartContainerResponse, error) {
-	log.Printf("psRqt :%+v", psRqt.DevicesIDs)
+	log.Printf("psRqt :%+v", psRqt.String())
+	//ckpoint, err := utils.GetCheckpointData(cdm.poolType)
+	//if err != nil {
+	//	fmt.Println("PreStartContainer", err)
+	//	return nil, err
+	//}
+	//fmt.Printf("ckpoint: %+v", ckpoint)
 	resp := &pluginapi.PreStartContainerResponse{}
 	return resp, nil
 }
 
 func (cdm *cpuDeviceManager) Start() error {
 	pluginEndpoint := filepath.Join(pluginapi.DevicePluginPath, cdm.socketFile)
+	if err := os.Remove(pluginEndpoint); err != nil {
+		fmt.Println("删除 socketfile", pluginEndpoint, err)
+	}
 	glog.Infof("Starting CPU Device Plugin server at: %s\n", pluginEndpoint)
 	lis, err := net.Listen("unix", pluginEndpoint)
 	if err != nil {
@@ -64,10 +84,14 @@ func (cdm *cpuDeviceManager) Start() error {
 	go cdm.grpcServer.Serve(lis)
 
 	// Wait for server to start by launching a blocking connection
-	conn, err := grpc.Dial(pluginEndpoint, grpc.WithInsecure(), grpc.WithBlock(),
-		grpc.WithTimeout(5*time.Second),
-		grpc.WithDialer(func(addr string, timeout time.Duration) (net.Conn, error) {
-			return net.DialTimeout("unix", addr, timeout)
+	log.Println("cpuDeviceManager start, pluginEndpoint:", pluginEndpoint)
+	conn, err := grpc.NewClient(fmt.Sprintf("unix://%s", pluginEndpoint), grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			// 使用自定义 Dialer 实现 WithBlock() 方法
+			dialer := utils.NewMyDialer(utils.RetryOption(50), utils.TimeoutOption(5*time.Second))
+			network, endpoint := utils.ParseDialTarget(addr)
+			conn, err := dialer.DialContext(ctx, network, endpoint)
+			return conn, err
 		}),
 	)
 	if err != nil {
@@ -102,6 +126,7 @@ func (cdm *cpuDeviceManager) ListAndWatch(e *pluginapi.Empty, stream pluginapi.D
 	var updateNeeded = true
 	for {
 		if updateNeeded {
+			cacheDevices := make(map[string]pluginapi.Device)
 			resp := new(pluginapi.ListAndWatchResponse)
 			if cdm.poolType == "shared" {
 				nbrOfCPUs := cdm.pool.CPUset.Size()
@@ -110,6 +135,7 @@ func (cdm *cpuDeviceManager) ListAndWatch(e *pluginapi.Empty, stream pluginapi.D
 					resp.Devices = append(resp.Devices, &pluginapi.Device{ID: cpuID, Health: pluginapi.Healthy})
 				}
 			} else {
+				//glog.Infoln("nodeTopology::", cdm.nodeTopology)
 				for _, cpuID := range cdm.pool.CPUset.List() {
 					// 根据超售率设置 CPU Core 数量
 					if cdm.pool.Overcommitment < 1 {
@@ -117,14 +143,16 @@ func (cdm *cpuDeviceManager) ListAndWatch(e *pluginapi.Empty, stream pluginapi.D
 					}
 					for overID := 0; overID < cdm.pool.Overcommitment; overID++ {
 						exclusiveCore := pluginapi.Device{ID: strconv.Itoa(cpuID + overID*cdm.numCPU), Health: pluginapi.Healthy}
-						if numaNode, exists := cdm.nodeTopology[cpuID+overID*cdm.numCPU]; exists {
+						//glog.Infoln("CPU信息: ", cpuID, overID*cdm.numCPU, cpuID+overID*cdm.numCPU)
+						if numaNode, exists := cdm.nodeTopology[cpuID]; exists {
 							exclusiveCore.Topology = &pluginapi.TopologyInfo{Nodes: []*pluginapi.NUMANode{{ID: int64(numaNode)}}}
 						}
+						cacheDevices[exclusiveCore.ID] = exclusiveCore
 						resp.Devices = append(resp.Devices, &exclusiveCore)
 					}
 				}
-				log.Printf("%+v +++ %v", resp.Devices, resp.String())
 			}
+			cdm.cacheDevices = cacheDevices
 			if err := stream.Send(resp); err != nil {
 				glog.Errorf("Error. Cannot update device states: %v\n", err)
 				return err
@@ -148,8 +176,7 @@ func (cdm *cpuDeviceManager) Allocate(ctx context.Context, rqt *pluginapi.Alloca
 			if err != nil {
 				continue
 			}
-			log.Println("分配CPU:", int(idN)%cdm.numCPU)
-			tempSet, _ := cpuset.Parse(strconv.Itoa(int(idN) % cdm.numCPU))
+			tempSet := cpuset.New(int(idN) % cdm.numCPU)
 			cpusAllocated = cpusAllocated.Union(tempSet)
 		}
 		if cdm.pool.HTPolicy == types.MultiThreadHTPolicy {
@@ -157,14 +184,64 @@ func (cdm *cpuDeviceManager) Allocate(ctx context.Context, rqt *pluginapi.Alloca
 		}
 		if cdm.poolType == "shared" {
 			envmap["SHARED_CPUS"] = cdm.sharedPoolCPUs
+		} else if cdm.poolType == "cloudphone" {
+			envmap["CLOUDPHONE_CPUS"] = cpusAllocated.String()
+			cpus := []int{}
+			for cpu, topol := range cdm.pool.CoreMap {
+				if cdm.cloudphoneCPUTopol[cpusAllocated.List()[0]].Node == topol.Node {
+					cpus = append(cpus, cpu)
+				}
+			}
+			envmap["NUMA_CPUS"] = cpuset.New(cpus...).String()
 		} else {
 			envmap["EXCLUSIVE_CPUS"] = cpusAllocated.String()
 		}
 		containerResp := new(pluginapi.ContainerAllocateResponse)
-		glog.Infof("CPUs allocated: %s: Num of CPUs %s", cpusAllocated.String(),
+		glog.Infof("Container: %v, CPUs allocated: %s: Num of CPUs %s",
+			container.String(),
+			cpusAllocated.String(),
 			strconv.Itoa(cpusAllocated.Size()))
 
+		// 通过环境变量与 setter 同步状态，/sys/fs/cgroup/cpuset/kubepods/xxx/xxxx/cpuset.cpus
 		containerResp.Envs = envmap
+
+		// TODO: 瀚博会走到这里，分配异常检查断言是否正确以及权限是否正确
+		if extDev, ok := cdm.cloudphoneExtDevs[cdm.nodeTopology[cpusAllocated.List()[0]]]; ok {
+			topol, ok := extDev.Next().(*topology.Topology)
+			if ok {
+				for _, v := range topol.Devices {
+					containerResp.Devices = append(containerResp.Devices, &pluginapi.DeviceSpec{
+						ContainerPath: v,
+						HostPath:      v,
+						Permissions:   "rwm",
+					})
+				}
+			}
+		}
+
+		// netint 和 amdgpu 在这里分配, 和瀚博设备不排斥
+		for _, dev := range cdm.cloudphoneCPUTopol[cpusAllocated.List()[0]].Devices {
+			fmt.Println(cdm.cloudphoneCPUTopol[cpusAllocated.List()[0]])
+			containerPath := dev
+			if strings.HasPrefix(dev, "/dev/dri/renderD") {
+				containerPath = "/dev/dri/renderD128"
+			}
+
+			containerResp.Devices = append(containerResp.Devices, &pluginapi.DeviceSpec{
+				ContainerPath: containerPath,
+				HostPath:      dev,
+				Permissions:   "rwm",
+			})
+		}
+
+		jb, err := jsoniter.MarshalIndent(containerResp, "", "  ")
+		if err != nil {
+			fmt.Println(err)
+		} else {
+			fmt.Println("debug:::: -->")
+			fmt.Println(string(jb))
+		}
+
 		resp.ContainerResponses = append(resp.ContainerResponses, containerResp)
 	}
 	return resp, nil
@@ -179,10 +256,15 @@ func (cdm *cpuDeviceManager) GetDevicePluginOptions(context.Context, *pluginapi.
 }
 
 func (cdm *cpuDeviceManager) Register(kubeletEndpoint, resourceName string) error {
-	conn, err := grpc.Dial(kubeletEndpoint, grpc.WithInsecure(),
-		grpc.WithDialer(func(addr string, timeout time.Duration) (net.Conn, error) {
-			return net.DialTimeout("unix", addr, timeout)
-		}))
+	log.Println(kubeletEndpoint)
+	conn, err := grpc.NewClient(fmt.Sprintf("unix://%s", kubeletEndpoint), grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			glog.Warning("grpc.Dial addr: %s", addr)
+			network, endpoint := utils.ParseDialTarget(addr)
+			return utils.NewMyDialer().DialContext(ctx, network, endpoint)
+		}),
+	)
+
 	if err != nil {
 		glog.Errorf("CPU Device Plugin cannot connect to Kubelet service: %v", err)
 		return err
@@ -207,11 +289,59 @@ func (cdm *cpuDeviceManager) Register(kubeletEndpoint, resourceName string) erro
 func (cdm *cpuDeviceManager) GetPreferredAllocation(ctx context.Context, req *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
 	//log.Printf("req %+v", req.String())
 	resp := &pluginapi.PreferredAllocationResponse{}
+
+	type numaT struct {
+		weight int
+		ids    []string
+	}
+
 	for _, c := range req.ContainerRequests {
-		preferredID := []string{}
+		preferredIDs := []string{}
 		idSet := map[int]struct{}{}
-		log.Println("ContainerRequest::", c.AvailableDeviceIDs, c.AllocationSize)
-		for _, n := range c.AvailableDeviceIDs {
+		// 传进来的 c.AvailableDeviceIDs 是乱序的，CPU 绑定numa 要先排序
+		slices.SortFunc(c.AvailableDeviceIDs, func(a, b string) int {
+			an, _ := strconv.ParseUint(a, 10, 32)
+			bn, _ := strconv.ParseUint(b, 10, 32)
+			return int(bn) - int(an)
+		})
+
+		log.Println("ContainerRequest::", cdm.nodeTopology, len(c.AvailableDeviceIDs), c.AllocationSize)
+		// 根据 numa 拓扑分配 CPU, 传入的 AvailableDeviceIDs 表示当前节点空闲的设备ID
+		numaSW := &weighted.SW{}
+		numaMap := map[int64]numaT{}
+		for _, id := range c.AvailableDeviceIDs {
+			// 计算每个 numa 节点的权重
+			core, ok := numaMap[cdm.cacheDevices[id].Topology.Nodes[0].GetID()]
+			if !ok {
+				core = numaT{
+					weight: 0,
+					ids:    []string{id},
+				}
+			} else {
+				core.weight = core.weight + 1
+				core.ids = append(core.ids, id)
+			}
+			numaMap[cdm.cacheDevices[id].Topology.Nodes[0].GetID()] = core
+		}
+
+		for k, numa := range numaMap {
+			numaSW.Add(k, numa.weight)
+		}
+
+		fmt.Println("debug numaSW:", numaSW.All())
+		numa, ok := numaSW.Next().(int64)
+		if !ok {
+			fmt.Println("类型错误")
+			return resp, nil
+		}
+
+		slices.SortFunc(numaMap[numa].ids, func(a, b string) int {
+			an, _ := strconv.ParseUint(a, 10, 32)
+			bn, _ := strconv.ParseUint(b, 10, 32)
+			return int(bn) - int(an)
+		})
+
+		for _, n := range numaMap[numa].ids {
 			id, err := strconv.Atoi(n)
 			if err != nil {
 				continue
@@ -219,28 +349,57 @@ func (cdm *cpuDeviceManager) GetPreferredAllocation(ctx context.Context, req *pl
 			if _, exists := idSet[id%cdm.numCPU]; exists {
 				continue
 			}
-			preferredID = append(preferredID, strconv.Itoa(id))
+
+			if len(preferredIDs) > 0 {
+				preId, _ := strconv.ParseFloat(preferredIDs[len(preferredIDs)-1], 10)
+				if cdm.nodeTopology[id%cdm.numCPU] != cdm.nodeTopology[int(preId)%cdm.numCPU] {
+					glog.Warningf("%v 跨numa，重新分配", append(preferredIDs, strconv.Itoa(id)))
+					preferredIDs = nil
+					idSet = map[int]struct{}{}
+				}
+
+				if int(math.Abs(preId-float64(id))) != 1 {
+					// 如果当前 numa node 不够分配则 重来
+					glog.Infof("%v 不连续，重新分配", append(preferredIDs, strconv.Itoa(id)))
+					preferredIDs = nil
+					idSet = map[int]struct{}{}
+				}
+			}
+
+			preferredIDs = append(preferredIDs, strconv.Itoa(id))
 			idSet[id%cdm.numCPU] = struct{}{}
 
-			if len(preferredID) == int(c.AllocationSize) {
+			if len(preferredIDs) == int(c.AllocationSize) {
 				break
 			}
+
 		}
-		resp.ContainerResponses = append(resp.ContainerResponses, &pluginapi.ContainerPreferredAllocationResponse{DeviceIDs: preferredID})
+		resp.ContainerResponses = append(resp.ContainerResponses, &pluginapi.ContainerPreferredAllocationResponse{DeviceIDs: preferredIDs})
 	}
 	return resp, nil
 }
 
 func newCPUDeviceManager(poolName string, pool types.Pool, sharedCPUs string) *cpuDeviceManager {
 	glog.Infof("Starting plugin for pool: %s", poolName)
+	numaWeight, err := topology.ConvertWeight(pool.NumaWeight)
+	if err != nil {
+		fmt.Println("NumaWeight 参数错误:", pool.NumaWeight, err)
+	}
+	cpuTopol, cpu, extDevs := topology.NewDevsPoller(numaWeight)
+
+	socketFile := fmt.Sprintf("cph-cpudp_%s.sock", poolName)
 	cdm := &cpuDeviceManager{
-		pool:           pool,
-		socketFile:     fmt.Sprintf("cpudp_%s.sock", poolName),
-		sharedPoolCPUs: sharedCPUs,
-		poolType:       types.DeterminePoolType(poolName),
-		nodeTopology:   topology.GetNodeTopology(),
-		htTopology:     topology.GetHTTopology(),
-		numCPU:         runtime.NumCPU(),
+		pool:               pool,
+		socketFile:         socketFile,
+		sharedPoolCPUs:     sharedCPUs,
+		poolType:           types.DeterminePoolType(poolName),
+		nodeTopology:       topology.GetNodeTopology(),
+		htTopology:         topology.GetHTTopology(),
+		numCPU:             int(utils.GetCpuInfo().Cores),
+		cloudphoneExtDevs:  extDevs,
+		cloudphoneCPU:      cpu,
+		cloudphoneCPUTopol: cpuTopol,
+		devicePluginPath:   "/var/lib/kubelet/device-plugins/",
 	}
 	return cdm
 }
@@ -299,6 +458,8 @@ func createPluginsForPools() error {
 			glog.Fatal(err)
 		}
 	}
+
+	// 找不到匹配的配置在这里退出
 	poolConf, err := types.DeterminePoolConfig()
 	if err != nil {
 		glog.Fatal(err)

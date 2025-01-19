@@ -1,4 +1,4 @@
-FROM golang:1.22.2-alpine3.19 AS builder
+FROM golang:1.23.2-alpine3.19 AS builder
 MAINTAINER Levente Kale <levente.kale@nokia.com>
 
 RUN apk add --no-cache ca-certificates make git bash sudo

@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cpupod-cloudphone
+  labels:
+    cpu-pooler: "cloudphone-pool-ex"
+spec:
+  containers:
+  - name: cputest-cloudphone
+    image: 100.76.9.59:8888/cloudphone/netshoot:v0.13
+    command: [ "/bin/sh", "-c", "--" ]
+    args: [ "while true; do sleep 1; done;" ]
+    imagePullPolicy: IfNotPresent
+    ports:
+    - containerPort: 80
+    resources:
+      requests:
+        memory: 2000Mi
+        bonc.k8s.io/cloudphone-pool-1e: "2"
+      limits:
+        memory: 2000Mi
+        bonc.k8s.io/cloudphone-pool-1e: "2"

@@ -1,9 +1,19 @@
 ---
 apiVersion: v1
+data:
+  .dockerconfigjson: eyJhdXRocyI6eyJzd3IuY24tc291dGgtMS5teWh1YXdlaWNsb3VkLmNvbSI6eyJ1c2VybmFtZSI6ImNuLXNvdXRoLTFARDdLNzI3SlBLN1RYQUlWUTVQVkciLCJwYXNzd29yZCI6ImQ1OTgzODkzMmMwNmY4YjM1MDBhZTg4ZmVjMTZjMzk3OWQyM2E4ZGZjYTZiODdjYWRjNTAxNjdiMDc3ZmM3Y2EiLCJhdXRoIjoiWTI0dGMyOTFkR2d0TVVCRU4wczNNamRLVUVzM1ZGaEJTVlpSTlZCV1J6cGtOVGs0TXpnNU16SmpNRFptT0dJek5UQXdZV1U0T0dabFl6RTJZek01Tnpsa01qTmhPR1JtWTJFMllqZzNZMkZrWXpVd01UWTNZakEzTjJaak4yTmgifX19
+kind: Secret
+metadata:
+  name: regcred
+  namespace: kube-plugins
+type: kubernetes.io/dockerconfigjson
+
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: cpu-dev-pod-mutator-svc
-  namespace: kube-system
+  namespace: kube-plugins
   labels:
     app: cpu-dev-pod-mutator 
 spec:
@@ -17,7 +27,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: cpu-dev-pod-mutator-deployment
-  namespace: kube-system
+  namespace: kube-plugins
   labels:
     app: cpu-dev-pod-mutator
 spec:
@@ -31,9 +41,11 @@ spec:
       labels:
         app: cpu-dev-pod-mutator
     spec:
+      imagePullSecrets:
+        - name: regcred
       containers:
         - name: cpu-dev-pod-mutator
-          image: docker.io/library/cpu-device-webhook:latest
+          image: 100.76.9.59:8888/cloudphone/cph-cpu-device-webhook:v0.0.0.17
           args:
             - -tls-cert-file=/etc/webhook/certs/cert.pem
             - -tls-private-key-file=/etc/webhook/certs/key.pem
@@ -47,8 +59,8 @@ spec:
             - name: cpu-pooler-config
               mountPath: /etc/cpu-pooler
       nodeSelector:
-         #node-role.kubernetes.io/master: ""
-         kubernetes.io/hostname: bms-cp-1-000
+         node-role.kubernetes.io/master: ""
+#         kubernetes.io/hostname: bms-cp-1-000
       volumes:
         - name: webhook-certs
           secret:

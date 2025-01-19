@@ -1,7 +1,7 @@
 #!/bin/bash
 service="cpu-dev-pod-mutator-svc"
 secret="cpu-dev-webhook-secret"
-namespace="kube-system"
+namespace="kube-plugins"
 cluster_domain="cluster.local"
 
 # Remove existing csr

@@ -68,14 +68,35 @@ func setAffinity(nbrCPUs int, cpuList []int) []int {
 	return cpuList[nbrCPUs:]
 }
 
-func pollCPUSetCompletion() (exclusiveCPUs, sharedCPUs []int) {
-	var cs, expCpus, exclusiveCPUSet, sharedCPUSet cpuset.CPUSet
+func pollCPUSetCompletion() (cloudphoneCPUs, exclusiveCPUs, sharedCPUs []int) {
+	var cs, expCpus, exclusiveCPUSet, sharedCPUSet, cloudphoneCPUSet cpuset.CPUSet
 	var err error
 	poolType := os.Getenv("CPU_POOLS")
 	fmt.Printf("Used CPU Pool(s):  %s\n", poolType)
 	// Wait max 10 seconds for cpusetter to set the cgroup cpuset
-	for i := 0; i < 30; i++ {
+	// TODO: 等待 CLOUDPHONE_CPUS 设置正确
+	for i := 0; i < 90; i++ {
 		switch poolType {
+		case types.CloudphonePoolID:
+			cloudphoneCPUSet, err = cpuset.Parse(os.Getenv("CLOUDPHONE_CPUS"))
+			if err != nil {
+				fmt.Printf("Cannot parse CLOUDPHONE_CPUS env variable, %v\n", err)
+			}
+			if cloudphoneCPUSet.IsEmpty() {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			numaCPUSet, err := cpuset.Parse(os.Getenv("NUMA_CPUS"))
+			if err != nil {
+				fmt.Printf("Cannot parse NUMA_CPUS env variable, %v\n", err)
+			}
+			if numaCPUSet.IsEmpty() {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			expCpus = numaCPUSet
+			fmt.Println("debug:", cloudphoneCPUSet.String(), numaCPUSet.String())
 		case types.ExclusivePoolID + "&" + types.SharedPoolID:
 			exclusiveCPUSet, err = cpuset.Parse(os.Getenv("EXCLUSIVE_CPUS"))
 			if err != nil {
@@ -130,8 +151,10 @@ func pollCPUSetCompletion() (exclusiveCPUs, sharedCPUs []int) {
 			cs.String(), expCpus.String())
 		if expCpus.Equals(cs) {
 			exclusiveCPUs = exclusiveCPUSet.List()
+			cloudphoneCPUs = cloudphoneCPUSet.List()
 			sharedCPUs = sharedCPUSet.List()
 			fmt.Printf("Exclusive cpu list %v\n", exclusiveCPUs)
+			fmt.Printf("Cloudphone cpu list %v\n", cloudphoneCPUs)
 			fmt.Printf("Shared cpu list %v\n", sharedCPUs)
 			return
 		}
@@ -153,7 +176,7 @@ func main() {
 	if myContainerName == "" {
 		panic("CONTAINER_NAME envrionment variable not found")
 	}
-	exclCPUs, sharedCPUs := pollCPUSetCompletion()
+	_, exclCPUs, sharedCPUs := pollCPUSetCompletion()
 	for _, container := range containers {
 		if container.Name != myContainerName {
 			continue

@@ -6,8 +6,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/fasthttp/router"
+	"github.com/valyala/fasthttp"
+	"github.com/valyala/fasthttp/fasthttpadaptor"
 	"io/ioutil"
 	v1 "k8s.io/api/admission/v1"
+	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -32,16 +37,17 @@ var (
 	scheme             = runtime.NewScheme()
 	codecs             = serializer.NewCodecFactory(scheme)
 	resourceBaseName   = "bonc.k8s.io"
-	processStarterPath = "/opt/bin/process-starter"
+	processStarterPath = "/opt/bin/cloudphone-process-starter"
 	certFile           string
 	keyFile            string
 	cfsQuotas          string
 )
 
 type containerPoolRequests struct {
-	sharedCPURequests    int
-	exclusiveCPURequests int
-	pools                map[string]int
+	sharedCPURequests     int
+	exclusiveCPURequests  int
+	cloudphoneCPURequests int
+	pools                 map[string]int
 }
 
 type poolRequestMap map[string]containerPoolRequests
@@ -81,6 +87,9 @@ func getCPUPoolRequests(pod *corev1.Pod) (poolRequestMap, error) {
 				}
 				if strings.HasPrefix(string(key), resourceBaseName+"/exclusive") {
 					cPoolRequests.exclusiveCPURequests += val
+				}
+				if strings.HasPrefix(string(key), resourceBaseName+"/cloudphone") {
+					cPoolRequests.cloudphoneCPURequests += val
 				}
 				poolName := strings.TrimPrefix(string(key), resourceBaseName+"/")
 				cPoolRequests.pools[poolName] = val
@@ -141,6 +150,9 @@ func setRequestLimit(requests containerPoolRequests, patchList []patch, contID i
 		}
 	} else if requests.sharedCPURequests > 0 {
 		totalCFSLimit = requests.sharedCPURequests
+	} else if requests.cloudphoneCPURequests > 0 && cfsQuotas == QuotaAll {
+		// 云手机场景下分配逻辑同 exclusiveCPURequests
+		totalCFSLimit = 1000*requests.cloudphoneCPURequests + 100
 	}
 	if totalCFSLimit > 0 {
 		patchList = patchCPULimit(totalCFSLimit, patchList, contID, contSpec)
@@ -204,6 +216,8 @@ func patchContainerEnv(poolRequests poolRequestMap, envPatched bool, patchList [
 		poolStr = types.ExclusivePoolID + "&" + types.SharedPoolID
 	} else if poolRequests[c.Name].exclusiveCPURequests > 0 {
 		poolStr = types.ExclusivePoolID
+	} else if poolRequests[c.Name].cloudphoneCPURequests > 0 {
+		poolStr = types.CloudphonePoolID
 	} else if poolRequests[c.Name].sharedCPURequests > 0 {
 		poolStr = types.SharedPoolID
 	} else {
@@ -305,7 +319,7 @@ func patchVolumesForPinning(patchList []patch, pod corev1.Pod) []patch {
 		// cpu volume
 		patchItem.Path = "/spec/volumes/-"
 		cpuVolumePathPatch := `{"name":"` + fmt.Sprintf("cpu-%s", container.Name) + `","hostPath":{ "path":"` +
-			fmt.Sprintf("/var/lib/kubelet/pods/sys/devices/system/cpu/%s/%s/%s", pod.Namespace, pod.Name, container.Name) +
+			fmt.Sprintf("/var/lib/kubelet/emulator/cpu/%s/%s/%s", pod.Namespace, pod.Name, container.Name) +
 			`","type": "DirectoryOrCreate" }}`
 		patchItem.Value = json.RawMessage(cpuVolumePathPatch)
 		patchList = append(patchList, patchItem)
@@ -382,6 +396,16 @@ func mutatePods(ar v1.AdmissionReview) *v1.AdmissionResponse {
 				pinningPatchNeeded = true
 			}
 		}
+
+		// cloudphone 配置
+		if poolRequests[contSpec.Name].cloudphoneCPURequests > 0 {
+			if len(contSpec.Command) == 0 && !pinningPatchNeeded {
+				glog.Warningf("Container %s asked cloudphone cpus but command not given. CPU affinity settings possibly lost for container", contSpec.Name)
+			} else {
+				pinningPatchNeeded = true
+			}
+		}
+
 		containerEnvPatched := false
 		if pinningPatchNeeded {
 			glog.V(2).Infof("Patch container for pinning %s", contSpec.Name)
@@ -394,7 +418,8 @@ func mutatePods(ar v1.AdmissionReview) *v1.AdmissionResponse {
 			containerEnvPatched = true
 		}
 		if poolRequests[contSpec.Name].sharedCPURequests > 0 ||
-			poolRequests[contSpec.Name].exclusiveCPURequests > 0 {
+			poolRequests[contSpec.Name].exclusiveCPURequests > 0 ||
+			poolRequests[contSpec.Name].cloudphoneCPURequests > 0 {
 			// Patch container environment variable
 			patchList, err = patchContainerEnv(poolRequests, containerEnvPatched, patchList, contID, &contSpec)
 			if err != nil {
@@ -460,11 +485,16 @@ func serveMutatePod(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deserializer := codecs.UniversalDeserializer()
+	glog.Infof("request body: %v", string(body))
 	if _, _, err := deserializer.Decode(body, nil, &requestedAdmissionReview); err != nil {
 		glog.Error(err)
 		responseAdmissionReview.Response = toAdmissionResponse(err)
 	} else {
-		responseAdmissionReview.Response = mutatePods(requestedAdmissionReview)
+		if requestedAdmissionReview.Request == nil {
+			responseAdmissionReview.Response = toAdmissionResponse(errors.New("AdmissionReview.Request is nil"))
+		} else {
+			responseAdmissionReview.Response = mutatePods(requestedAdmissionReview)
+		}
 	}
 
 	responseAdmissionReview.Response.UID = requestedAdmissionReview.Request.UID
@@ -488,7 +518,7 @@ func main() {
 	flag.StringVar(&keyFile, "tls-private-key-file", keyFile, ""+
 		"File containing the default x509 private key matching --tls-cert-file.")
 	flag.StringVar(&processStarterPath, "process-starter-path", processStarterPath, ""+
-		"Path to process-starter binary file. Optional parameter, default path is /opt/bin/process-starter.")
+		"Path to process-starter binary file. Optional parameter, default path is /opt/bin/cloudphone-process-starter.")
 	flag.StringVar(&cfsQuotas, "cfs-quotas", QuotaAll,
 		"Controls if CPU-Pooler automatically provisions CFS quotas for its managed containers.\n"+
 			"Possible values are:\n"+
@@ -501,12 +531,22 @@ func main() {
 		glog.Fatal(err)
 	}
 
-	http.HandleFunc("/mutating-pods", serveMutatePod)
+	//http.HandleFunc("/mutating-pods", serveMutatePod)
 	server := &http.Server{
 		Addr:         ":443",
 		TLSConfig:    &tls.Config{Certificates: []tls.Certificate{cert}},
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,
 	}
-	server.ListenAndServeTLS("", "")
+	//server.ListenAndServeTLS("", "")
+
+	ln, err := net.Listen("tcp", server.Addr)
+	// 创建路由
+	r := router.New()
+	r.ANY("/mutating-pods", fasthttpadaptor.NewFastHTTPHandlerFunc(serveMutatePod))
+	if err := fasthttp.Serve(
+		tls.NewListener(ln, server.TLSConfig.Clone()), Combined(r.Handler),
+	); err != nil {
+		log.Fatalln(err)
+	}
 }

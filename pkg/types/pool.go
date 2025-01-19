@@ -1,32 +1,17 @@
+//go:build cgo
+
 package types
 
 import (
 	"fmt"
 	"github.com/golang/glog"
 	"github.com/nokia/CPU-Pooler/pkg/k8sclient"
+	"github.com/nxsre/toolkit/pkg/topology"
 	"gopkg.in/yaml.v3"
 	"k8s.io/utils/cpuset"
 	"os"
 	"path/filepath"
 	"strings"
-)
-
-const (
-	//SharedPoolID is the constant prefix in the name of the CPU pool. It is used to signal that a CPU pool is of shared type
-	// SharedPoolID 是 CPU 池名称中的常量前缀. 表示 CPU 池是共享类型的
-	SharedPoolID = "shared"
-	//ExclusivePoolID is the constant prefix in the name of the CPU pool. It is used to signal that a CPU pool is of exclusive type
-	// ExclusivePoolID 是 CPU 池名称中的常量前缀. 表示 CPU 池是独占类型
-	ExclusivePoolID = "exclusive"
-	//DefaultPoolID is the constant prefix in the name of the CPU pool. It is used to signal that a CPU pool is of default type
-	// DefaultPoolID 是 CPU 池名称中的常量前缀. 表示 CPU 池是默认类型
-	DefaultPoolID = "default"
-	//SingleThreadHTPolicy is the constant for the single threaded value of the HT policy pool attribute. Only the physical thread is allocated for exclusive requests when this value is set
-	// SingleThreadHTPolicy 是 HT 策略池属性的单线程值的常量。设置该值时，只为独占请求分配物理线程
-	SingleThreadHTPolicy = "singleThreaded"
-	//MultiThreadHTPolicy is the constant for the multi threaded value of the HT policy pool attribute. All siblings are allocated together for exclusive requests when this value is set
-	// MultiThreadHTPolicy 是 HT 策略池属性的多线程值的常量。设置此值时，所有兄弟一起分配用于独占请求
-	MultiThreadHTPolicy = "multiThreaded"
 )
 
 var (
@@ -41,6 +26,11 @@ type Pool struct {
 	HTPolicy string `yaml:"hyperThreadingPolicy"`
 	// overcommitment 超售率，设置CPU倍数
 	Overcommitment int `yaml:"overcommitment"`
+	// numa节点分配权重，用于在 pod cpuset 设置为整numa节点时使用
+	NumaWeight   string `yaml:"numaWeight"`
+	PhysicalCore int    `json:"numcore"`
+
+	CoreMap map[int]topology.Topology
 }
 
 // PoolConfig defines pool configuration for a node
@@ -57,6 +47,8 @@ func DeterminePoolType(poolName string) string {
 		return SharedPoolID
 	} else if strings.HasPrefix(poolName, ExclusivePoolID) {
 		return ExclusivePoolID
+	} else if strings.HasPrefix(poolName, CloudphonePoolID) {
+		return CloudphonePoolID
 	}
 	return DefaultPoolID
 }
@@ -96,6 +88,8 @@ func readPoolConfig(labelMap map[string]string) (PoolConfig, error) {
 
 // ReadPoolConfigFile reads a pool configuration file
 func ReadPoolConfigFile(name string) (PoolConfig, error) {
+	coreMap := topology.GetCGPUTopology()
+
 	file, err := os.ReadFile(name)
 	if err != nil {
 		return PoolConfig{}, fmt.Errorf("could not read poolconfig file: %s, because: %s", name, err)
@@ -107,12 +101,21 @@ func ReadPoolConfigFile(name string) (PoolConfig, error) {
 	}
 	for poolName, poolBody := range poolConfig.Pools {
 		tempPool := poolBody
+		tempPool.CoreMap = make(map[int]topology.Topology)
 		tempPool.CPUset, err = cpuset.Parse(poolBody.CPUStr)
 		if err != nil {
 			return PoolConfig{}, fmt.Errorf("CPUs could not be parsed because: %s", err)
 		}
 		if poolBody.HTPolicy == "" {
 			tempPool.HTPolicy = SingleThreadHTPolicy
+		}
+
+		fmt.Println("tempPool.CPUset:::", tempPool.CPUset.String())
+		for k, v := range coreMap {
+			fmt.Println("debug coremap:::", k, v, tempPool.CPUset.Contains(k))
+			if tempPool.CPUset.Contains(k) {
+				tempPool.CoreMap[k] = v
+			}
 		}
 		poolConfig.Pools[poolName] = tempPool
 	}

@@ -137,7 +137,7 @@ func CreateCheckpointFile() error {
 		return err
 	}
 
-	err = ioutil.WriteFile(filepath.Join(chkpntPath, fileName), []byte(content), 0777)
+	err = os.WriteFile(filepath.Join(chkpntPath, fileName), []byte(content), 0777)
 	if err != nil {
 		return err
 	}

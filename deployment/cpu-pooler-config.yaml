@@ -2,14 +2,20 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cpu-pooler-configmap
-  namespace: kube-system
+  namespace: kube-plugins
 data:
   poolconfig-controller.yaml: |
     pools: 
-      exclusive-pool-cloudphon-1e:
+      exclusive-pool-cloudphon-ex:
         cpus : "64-127"
         hyperThreadingPolicy: singleThreaded
         overcommitment: 3
+      # 云手机场景使用
+      cloudphone-pool-ex:
+        cpus : "8-31,36-63,68-95,100-127"
+        hyperThreadingPolicy: singleThreaded
+        numaWeight: "0:22,1:26,2:26,3:26"
+        overcommitment: 4
       exclusive-pool:
         cpus : "4,5"
         hyperThreadingPolicy: singleThreaded
@@ -22,4 +28,4 @@ data:
         cpus: "0"
     nodeSelector:
       #node-role.kubernetes.io/node: 
-      kubernetes.io/hostname: xxx
+      kubernetes.io/hostname: bms-26839362

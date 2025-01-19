@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"github.com/nokia/CPU-Pooler/pkg/checkpoint"
 	"github.com/nokia/CPU-Pooler/pkg/k8sclient"
-	"github.com/nokia/CPU-Pooler/pkg/topology"
 	"github.com/nokia/CPU-Pooler/pkg/types"
 	"github.com/nokia/CPU-Pooler/pkg/utils"
+	"github.com/nxsre/toolkit/pkg/topology"
 	"golang.org/x/sys/unix"
 	"io"
 	"k8s.io/api/core/v1"
@@ -27,7 +27,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -35,7 +34,7 @@ import (
 
 const (
 	//MaxRetryCount controls how many times we re-try a remote API operation
-	MaxRetryCount = 150
+	MaxRetryCount = 5
 	//RetryInterval controls how much time (in milliseconds) we wait between two retry attempts when talking to a remote API
 	RetryInterval = 200
 )
@@ -46,6 +45,9 @@ var (
 	setterAnnotationSuffix = "cpusets-configured"
 	setterAnnotationKey    = resourceBaseName + "/" + setterAnnotationSuffix
 	containerPrefixList    = []string{"docker://", "containerd://"}
+
+	// 物理机可用 CPU 总核心数，计算超售 CPU 绑定物理核心依赖次参数
+	numOfCpus = int(utils.GetCpuInfo().Cores)
 )
 
 type workItem struct {
@@ -91,6 +93,7 @@ func New(kubeConf string, poolConfig types.PoolConfig, cpusetRoot, cpuRoot strin
 	}
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, time.Second)
 	podInformer := kubeInformerFactory.Core().V1().Pods().Informer()
+
 	setHandler := SetHandler{
 		poolConfig:      poolConfig,
 		cpusetRoot:      cpusetRoot,
@@ -102,7 +105,10 @@ func New(kubeConf string, poolConfig types.PoolConfig, cpusetRoot, cpuRoot strin
 	}
 	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			setHandler.PodAdded((reflect.ValueOf(obj).Interface().(*v1.Pod)))
+			//setHandler.PodAdded((reflect.ValueOf(obj).Interface().(*v1.Pod)))
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			setHandler.PodChanged(reflect.ValueOf(oldObj).Interface().(*v1.Pod), reflect.ValueOf(newObj).Interface().(*v1.Pod))
 		},
 	})
 	podInformer.SetWatchErrorHandler(setHandler.WatchErrorHandler)
@@ -134,14 +140,28 @@ func (setHandler *SetHandler) PodAdded(pod *v1.Pod) {
 }
 
 // PodChanged handles UPDATE operations
-func (setHandler *SetHandler) PodChanged(oldPod, newPod v1.Pod) {
+func (setHandler *SetHandler) PodChanged(oldPod, newPod *v1.Pod) {
 	//The maze wasn't meant for you either
-	log.Println("oldPod ---->", oldPod.Namespace, oldPod.Name, oldPod.Status.Phase)
-	log.Println("newPod ---->", newPod.Namespace, newPod.Name, newPod.Status.Phase)
-	if newPod.Status.Phase != v1.PodRunning {
+	item := workItem{newPod: newPod, oldPod: oldPod}
+	oldRestarts, oldLastRestartDate, oldRestartsStr, oldReason := k8sclient.PodStatus(oldPod)
+	newRestarts, newLastRestartDate, newRestartsStr, newReason := k8sclient.PodStatus(newPod)
+
+	//log.Println("PodChanged", oldPod.Name, newRestarts, oldReason, newReason)
+
+	// 状态发生变化才需要放入更新队列
+	if oldPod.Status.Phase != newPod.Status.Phase && newPod.Status.Phase == v1.PodRunning {
+		log.Printf("oldPod ----> newPod namespace:%s  podname:%s: %s --> %s", oldPod.Namespace, oldPod.Name, oldPod.Status.Phase, newPod.Status.Phase)
+		setHandler.workQueue.Add(item)
 		return
 	}
-	setHandler.handlePods(workItem{oldPod: &oldPod, newPod: &newPod})
+
+	if (oldReason != newReason && v1.PodPhase(newReason) == v1.PodRunning) || (oldReason == newReason && v1.PodPhase(newReason) == v1.PodRunning && newRestarts > oldRestarts) {
+		log.Printf("oldPod ---> newPod, old-name:%s, restarts:%d, time:%s, str:%s, reason:%s ---> new-name:%s, restarts:%d, time:%s, str:%s, reason:%s",
+			oldPod.Name, oldRestarts, oldLastRestartDate, oldRestartsStr, oldReason,
+			newPod.Name, newRestarts, newLastRestartDate, newRestartsStr, newReason)
+		setHandler.workQueue.Add(item)
+		return
+	}
 }
 
 // WatchErrorHandler is an event handler invoked when the CPUSetter Controller's connection to the K8s API server breaks
@@ -284,7 +304,7 @@ func (setHandler *SetHandler) adjustContainerSets(pod v1.Pod, containersToBeSet 
 		if _, found := containersToBeSet[container.Name]; !found {
 			continue
 		}
-		cpuset, err := setHandler.determineCorrectCpuset(pod, container)
+		cfgContainerCPUSet, realCPUSet, err := setHandler.determineCorrectCpuset(pod, container)
 		if err != nil {
 			return errors.New("correct cpuset for the containers of Pod: " + pod.ObjectMeta.Name + " ID: " + string(pod.ObjectMeta.UID) + " could not be calculated in thread:" + strconv.Itoa(unix.Gettid()) + " because:" + err.Error())
 		}
@@ -292,11 +312,11 @@ func (setHandler *SetHandler) adjustContainerSets(pod v1.Pod, containersToBeSet 
 		if containerID == "" {
 			return errors.New("cannot determine container ID of container: " + container.Name + " in Pod: " + pod.ObjectMeta.Name + " ID: " + string(pod.ObjectMeta.UID) + " in thread:" + strconv.Itoa(unix.Gettid()) + " because:" + err.Error())
 		}
-		pathToContainerCpusetFile, err = setHandler.applyCpusetToContainer(pod.ObjectMeta, containerID, cpuset)
+		pathToContainerCpusetFile, err = setHandler.applyCpusetToContainer(pod.ObjectMeta, containerID, realCPUSet)
 		if err != nil {
 			return errors.New("cpuset of container: " + container.Name + " in Pod: " + pod.ObjectMeta.Name + " ID: " + string(pod.ObjectMeta.UID) + " could not be re-adjusted in thread:" + strconv.Itoa(unix.Gettid()) + " because:" + err.Error())
 		}
-		pathToContainerCpusFile, err = setHandler.applyCpusToContainer(pod.ObjectMeta, container.Name, containerID, cpuset)
+		pathToContainerCpusFile, err = setHandler.applyCpusToContainer(pod.ObjectMeta, container.Name, containerID, cfgContainerCPUSet)
 		if err != nil {
 			return errors.New("cpu of container: " + container.Name + " in Pod: " + pod.ObjectMeta.Name + " ID: " + string(pod.ObjectMeta.UID) + " could not be re-adjusted in thread:" + strconv.Itoa(unix.Gettid()) + " because:" + err.Error())
 		}
@@ -306,41 +326,66 @@ func (setHandler *SetHandler) adjustContainerSets(pod v1.Pod, containersToBeSet 
 	if err != nil {
 		return errors.New("cpuset of the infra container in Pod: " + pod.ObjectMeta.Name + " ID: " + string(pod.ObjectMeta.UID) + " could not be re-adjusted in thread:" + strconv.Itoa(unix.Gettid()) + " because:" + err.Error())
 	}
-	err = k8sclient.SetPodAnnotation(pod, setterAnnotationKey, "true")
+	err = k8sclient.SetPodAnnotation(&pod, setterAnnotationKey, "true")
 	if err != nil {
 		return errors.New("could not update annotation in Pod:" + pod.ObjectMeta.Name + " ID: " + string(pod.ObjectMeta.UID) + "  in thread:" + strconv.Itoa(unix.Gettid()) + " because: " + err.Error())
 	}
 	return nil
 }
 
-func (setHandler *SetHandler) determineCorrectCpuset(pod v1.Pod, container v1.Container) (cpuset.CPUSet, error) {
+func (setHandler *SetHandler) determineCorrectCpuset(pod v1.Pod, container v1.Container) (cpuset.CPUSet, cpuset.CPUSet, error) {
 	var (
-		sharedCPUSet, exclusiveCPUSet cpuset.CPUSet
-		err                           error
+		sharedCPUSet, exclusiveCPUSet, cloudphoneCPUSet cpuset.CPUSet
+		err                                             error
 	)
 	for resourceName := range container.Resources.Requests {
 		resNameAsString := string(resourceName)
+		fmt.Println("resNameAsString:::", resNameAsString)
 		if strings.Contains(resNameAsString, resourceBaseName) && strings.Contains(resNameAsString, types.SharedPoolID) {
 			sharedCPUSet = setHandler.poolConfig.SelectPool(types.SharedPoolID).CPUset
 		} else if strings.Contains(resNameAsString, resourceBaseName) && strings.Contains(resNameAsString, types.ExclusivePoolID) {
 			exclusiveCPUSet, err = setHandler.getListOfAllocatedExclusiveCpus(resNameAsString, pod, container)
 			if err != nil {
-				return cpuset.CPUSet{}, err
+				return cpuset.CPUSet{}, cpuset.CPUSet{}, err
 			}
 			fullResName := strings.Split(resNameAsString, "/")
 			exclusivePoolName := fullResName[1]
+			fmt.Println("exclusivePoolName:::", exclusivePoolName)
 			if setHandler.poolConfig.SelectPool(exclusivePoolName).HTPolicy == types.MultiThreadHTPolicy {
 				htMap := topology.GetHTTopology()
 				exclusiveCPUSet = topology.AddHTSiblingsToCPUSet(exclusiveCPUSet, htMap)
 			}
+		} else if strings.Contains(resNameAsString, resourceBaseName) && strings.Contains(resNameAsString, types.CloudphonePoolID) {
+			cloudphoneCPUSet, err = setHandler.getListOfAllocatedExclusiveCpus(resNameAsString, pod, container)
+			if err != nil {
+				return cpuset.CPUSet{}, cpuset.CPUSet{}, err
+			}
+			fullResName := strings.Split(resNameAsString, "/")
+			cloudphonePoolName := fullResName[1]
+			fmt.Println("cloudphonePoolName:::", cloudphonePoolName, "cloudphoneCPUSet::", cloudphoneCPUSet.String())
+			if cloudphoneCPUSet.IsEmpty() {
+				fmt.Println("cloudphoneCPUSet 为空，返回")
+				return cpuset.CPUSet{}, cpuset.CPUSet{}, errors.New("getListOfAllocatedExclusiveCpus cloudphoneCPUSet isEmpty!")
+			}
+			realCPUSet := cpuset.New()
+			numaNodeIdx := setHandler.poolConfig.SelectPool(cloudphonePoolName).CoreMap[cloudphoneCPUSet.List()[0]].Node
+			for _, v := range setHandler.poolConfig.SelectPool(cloudphonePoolName).CoreMap {
+				if v.Node == numaNodeIdx {
+					realCPUSet = realCPUSet.Union(realCPUSet, cpuset.New(v.Core))
+				}
+			}
+			return cloudphoneCPUSet, realCPUSet, nil
 		}
 	}
+	log.Println("determineCorrectCpuset:::", pod.Name, exclusiveCPUSet.String())
 	if !sharedCPUSet.IsEmpty() || !exclusiveCPUSet.IsEmpty() {
-		return sharedCPUSet.Union(exclusiveCPUSet), nil
+		return sharedCPUSet.Union(exclusiveCPUSet), sharedCPUSet.Union(exclusiveCPUSet), nil
 	}
-	return setHandler.poolConfig.SelectPool(types.DefaultPoolID).CPUset, nil
+	defaultCPUSet := setHandler.poolConfig.SelectPool(types.DefaultPoolID).CPUset
+	return defaultCPUSet, defaultCPUSet, nil
 }
 
+// TODO: 使用 utils.GetCheckpointData 替代
 func (setHandler *SetHandler) getListOfAllocatedExclusiveCpus(exclusivePoolName string, pod v1.Pod, container v1.Container) (cpuset.CPUSet, error) {
 	checkpointFileName := "/var/lib/kubelet/device-plugins/kubelet_internal_checkpoint"
 	buf, err := os.ReadFile(checkpointFileName)
@@ -380,7 +425,7 @@ func calculateFinalExclusiveSet(exclusiveCpus []string, pod v1.Pod, container v1
 		if err != nil {
 			return cpuset.CPUSet{}, err
 		}
-		setBuilder = setBuilder.Union(cpuset.New(deviceIDasInt % runtime.NumCPU()))
+		setBuilder = setBuilder.Union(cpuset.New(deviceIDasInt % numOfCpus))
 	}
 	return setBuilder, nil
 }
@@ -415,6 +460,11 @@ func containerIDInPodStatus(podStatus v1.PodStatus, containerDirName string) boo
 
 // 解压 CPU.tar 到容器内
 func (setHandler *SetHandler) applyCpusToContainer(podMeta metav1.ObjectMeta, containerName, containerID string, cpuSet cpuset.CPUSet) (string, error) {
+	log.Println("解压 CPU.tar", podMeta.Name, containerID)
+	defer func() {
+		log.Println("解压 CPU.tar 完成", podMeta.Name, containerID)
+	}()
+
 	containerCPURootBase := filepath.Join(setHandler.cpuRoot, podMeta.Namespace, podMeta.Name, containerName)
 	if exists, _ := utils.PathExists(containerCPURootBase); !exists {
 		if err := os.MkdirAll(containerCPURootBase, 0755); err != nil {
@@ -423,6 +473,8 @@ func (setHandler *SetHandler) applyCpusToContainer(podMeta metav1.ObjectMeta, co
 		}
 	}
 
+	log.Println("容器目录:", containerCPURootBase)
+
 	// 删除已存在目录
 	empty, _ := utils.IsEmpty(containerCPURootBase)
 	if !empty {
@@ -430,6 +482,7 @@ func (setHandler *SetHandler) applyCpusToContainer(podMeta metav1.ObjectMeta, co
 		if err != nil {
 			return "", err
 		}
+
 		for _, entry := range entries {
 			err := os.RemoveAll(filepath.Join(containerCPURootBase, entry.Name()))
 			if err != nil {
@@ -442,6 +495,7 @@ func (setHandler *SetHandler) applyCpusToContainer(podMeta metav1.ObjectMeta, co
 	if err != nil {
 		return "", err
 	}
+	defer tmpDir.Delete()
 	file, err := utils.CPUFS.Open(utils.CPUInfrastructure)
 	if err != nil {
 		return "", err
@@ -457,8 +511,10 @@ func (setHandler *SetHandler) applyCpusToContainer(podMeta metav1.ObjectMeta, co
 	}
 
 	var virtualCpuSet = cpuset.New(0)
-	if len(cpuSet.UnsortedList()) > 1 {
-		for id, _ := range cpuSet.UnsortedList()[1:] {
+	log.Println("cpuSet::", cpuSet.String(), tmpDir.Name)
+	if len(cpuSet.List()) > 1 {
+		for id, _ := range cpuSet.List()[1:] {
+			fmt.Println("拷贝目录 debug:", id)
 			virtualCpuSet = virtualCpuSet.Union(cpuset.New(id + 1))
 			cpuZeroDir := filepath.Join(containerCPURootBase, "cpu0")
 			cpuNumDir := filepath.Join(containerCPURootBase, fmt.Sprintf("cpu%d", id+1))
@@ -473,6 +529,12 @@ func (setHandler *SetHandler) applyCpusToContainer(podMeta metav1.ObjectMeta, co
 		}
 	}
 
+	filePath := filepath.Join(containerCPURootBase, "kernel_max")
+	if err := os.WriteFile(filePath, []byte(strconv.Itoa(len(cpuSet.List())-1)), 0644); err != nil {
+		log.Println("CPU 数量写入失败", err)
+		return "", err
+	}
+
 	for _, file := range []string{"online", "possible", "present"} {
 		filePath := filepath.Join(containerCPURootBase, file)
 		if err := os.WriteFile(filePath, []byte(virtualCpuSet.String()), 0644); err != nil {
@@ -483,8 +545,8 @@ func (setHandler *SetHandler) applyCpusToContainer(podMeta metav1.ObjectMeta, co
 	return "", nil
 }
 
-func (setHandler *SetHandler) applyCpusetToContainer(podMeta metav1.ObjectMeta, containerID string, cpuset cpuset.CPUSet) (string, error) {
-	if cpuset.IsEmpty() {
+func (setHandler *SetHandler) applyCpusetToContainer(podMeta metav1.ObjectMeta, containerID string, containerCpuset cpuset.CPUSet) (string, error) {
+	if containerCpuset.IsEmpty() {
 		//Nothing to set. We will leave the container running on the Kubernetes provisioned default cpuset
 		log.Println("WARNING: cpuset to set was quite empty for container:" + containerID + " in Pod:" + podMeta.Name + " ID:" + string(podMeta.UID) + " in thread:" + strconv.Itoa(unix.Gettid()) + ". I left it untouched.")
 		return "", nil
@@ -518,10 +580,11 @@ func (setHandler *SetHandler) applyCpusetToContainer(podMeta metav1.ObjectMeta, 
 		}
 		return nil
 	})
+
 	if err != nil {
 		return "", fmt.Errorf("%s child cpuset path error: %s", containerID, err.Error())
 	}
-	err = os.WriteFile(pathToContainerCpusetFile+"/cpuset.cpus", []byte(cpuset.String()), 0755)
+	err = os.WriteFile(pathToContainerCpusetFile+"/cpuset.cpus", []byte(containerCpuset.String()), 0755)
 	if err != nil {
 		return "", fmt.Errorf("can't modify cpuset file: %s for container: %s because: %s", pathToContainerCpusetFile, containerID, err)
 	}
@@ -557,6 +620,7 @@ func (setHandler *SetHandler) applyCpusetToInfraContainer(podMeta metav1.ObjectM
 	if pathToContainerCpusetFile == "" {
 		return fmt.Errorf("cpuset file does not exist for infra container under the provided cgroupfs hierarchy: %s", setHandler.cpusetRoot)
 	}
+	// 可以根据需要，写入当前分配 core 所在 numa 节点的全部 core。比如分配的是 4-7，可写入当前 numa 节点的 4-31
 	err := os.WriteFile(pathToContainerCpusetFile+"/cpuset.cpus", []byte(cpuset.String()), 0755)
 	if err != nil {
 		return fmt.Errorf("can't modify cpuset file: %s for infra container: %s because: %s", pathToContainerCpusetFile, filepath.Base(pathToContainerCpusetFile), err)
@@ -583,7 +647,7 @@ func (setHandler *SetHandler) startReconciliationLoop() {
 }
 
 func (setHandler *SetHandler) reconcileCpusets() error {
-	pods, err := k8sclient.GetMyPods()
+	pods, err := k8sclient.GetPodsFromKubelet()
 	if pods == nil || err != nil {
 		return errors.New("couldn't List my Pods in the reconciliation loop because:" + err.Error())
 	}
@@ -618,7 +682,6 @@ func (setHandler *SetHandler) reconcileContainer(leafCpusets []string, pod v1.Po
 	if containerID == "" {
 		return nil
 	}
-	numOfCpus := runtime.NumCPU()
 	badCpuset, _ := cpuset.Parse("0-" + strconv.Itoa(numOfCpus-1))
 	for _, leaf := range leafCpusets {
 		if strings.Contains(leaf, containerID) {
@@ -626,10 +689,13 @@ func (setHandler *SetHandler) reconcileContainer(leafCpusets []string, pod v1.Po
 			currentCpusetStr := strings.TrimSpace(string(currentCpusetByte))
 			currentCpuset, _ := cpuset.Parse(currentCpusetStr)
 			if badCpuset.Equals(currentCpuset) {
-				correctSet, err := setHandler.determineCorrectCpuset(pod, container)
+				configCPUSet, correctSet, err := setHandler.determineCorrectCpuset(pod, container)
 				if err != nil {
 					return errors.New("could not determine correct cpuset because:" + err.Error())
 				}
+				log.Println("写入 cpuset.cpus", pod.Namespace, pod.Name, container.Name)
+				path, err := setHandler.applyCpusToContainer(pod.ObjectMeta, container.Name, containerID, configCPUSet)
+				log.Println("生成CPU文件:", path, err)
 				err = os.WriteFile(leaf+"/cpuset.cpus", []byte(correctSet.String()), 0755)
 				if err != nil {
 					return errors.New("could not overwrite cpuset file:" + leaf + "/cpuset.cpus because:" + err.Error())
